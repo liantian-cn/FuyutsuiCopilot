@@ -43,7 +43,7 @@ Python 端读取到的是：
 | `专精` | `C_SpecializationInfo.GetSpecialization()` | 专精序号，通常 1-4，不是 65/250 这类 specID |
 | `有效性` | `not isDead and not mounted and not isChatOpen and not drinkStatus` | Python 主循环只有它为真才执行战斗逻辑 |
 | `战斗` | `UnitAffectingCombat("player")` | 0/1 |
-| `移动` | `IsPlayerMoving()` 事件结果 | 0/1，不是移动速度 |
+| `移动` | `IsPlayerMoving()` 初始值, 由 PLAYER_STARTED_MOVING/PLAYER_STOPPED_MOVING 事件刷新 | 0/1，不是移动速度 |
 | `施法` | `UnitCastingDuration("player")` | 施法已用时间，按 0-2.55 秒映射到 0-255 |
 | `引导` | `UnitChannelDuration("player")` | 引导剩余时间，按 0-2.55 秒映射到 0-255 |
 | `蓄力` | `UnitEmpoweredChannelDuration("player")` | 蓄力剩余时间，按 0-2.55 秒映射到 0-255 |
@@ -53,7 +53,7 @@ Python 端读取到的是：
 | `一键辅助` | `C_AssistedCombat.GetNextCastSpell()` | 暴雪一键辅助推荐法术在 `spellsList` 中的索引 |
 | `法术失败` | `UNIT_SPELLCAST_FAILED` + `spellsList[spellID].failed` | 最近失败法术索引，1.5 秒后清空 |
 | `目标类型` | 目标敌友、距离、死亡、可驱散类型 | 0、1-3、11-15 |
-| `队伍类型` | `UnitInRaid("player")` / `UnitInParty("player")` | 单人 0；小队 46；团队为玩家 raid index |
+| `队伍类型` | `UnitInRaid("player")` / `UnitInParty("player")`（46 为硬编码哨兵值，非 API 返回值） | 单人 0；小队 46；团队为玩家 raid index |
 | `队伍人数` | `GetNumGroupMembers()` | 当前队伍/团队人数 |
 | `首领战` | `ENCOUNTER_START/END` + `bossID` 映射 | 当前首领内部编号，非 encounterID 原值 |
 | `难度` | encounter 事件的 `difficultyID` | 游戏难度 ID |
@@ -97,7 +97,7 @@ local _, _, b = healthPercent:GetRGB()
 self:CreatTexture(blocks.state["生命值"], b)
 ```
 
-`curve100` 把百分比映射到 B 通道，Python 读到的值通常就是 0-100 的整数百分比。`UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 都会触发玩家血量刷新。
+`curve100` 把百分比映射到 B 通道，Python 读到的值通常是 1-100 的整数百分比（0% 生命值时 curve100 有两个控制点重叠于 t=0，第二个点的 B=1/255 覆盖了第一个点的 B=0，因此 Python 读到的是 1 而非 0）。`UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 都会触发玩家血量刷新。
 
 这里读的是百分比，不是当前血量数值，也不是最大血量数值。Python 职业逻辑通常直接比较：
 
@@ -120,6 +120,7 @@ self:updatePlayerPower(powerType)
 
 - 最大值大于等于 250：按 0-100 输出百分比，适合法力这类大资源。
 - 最大值小于 250：按 0-`powerMax` 输出实际点数，适合能量、怒气等较小资源。
+- `CreatPowerCurve(powerType)` 有永久缓存机制：首次为某资源类型创建曲线后缓存于 `powerCurve[powerType]`，后续调用直接返回缓存（main.lua 第 54 行 `if powerCurve[powerType] then return end`）。这意味着曲线在运行期间不会因资源最大值变化（如专精切换、等级提升）而更新。
 
 `updatePlayerPower(powerType)` 还有一个特殊资源分支：
 
@@ -204,6 +205,8 @@ self:updatePlayerValid()
 | `HealthPotionCount`、`ManaPotionCount`、`HealthstoneCount`、`RecklessnessCount`、`LightsPotentialCount` | `C_Item.GetItemCount()` | 不直接输出数量；只影响对应物品冷却字段是否写 255 |
 | `DefensiveAuraInstanceID` | `UNIT_AURA` 中的 `HELPFUL|BIG_DEFENSIVE` 光环 | 不输出 auraInstanceID；只在有 `防御光环` block 时输出剩余时间 |
 
+另外注意物品计数刷新存在两个问题：一是 `ITEM_COUNT_CHANGED` 在 `core.lua` 的 `OnEnable` 中未注册（尽管 `main.lua` 第 1568 行已定义处理函数），物品数量变更无法通过事件触发更新。二是 `updateItemCoolDown()` 中每个物品仅当对应计数为 nil 时才调用 `GetItemCount()`（如 `if not self.state.HealthPotionCount then self:GetItemCount() end`），一旦计数设为 0 就永久跳过刷新。两者叠加导致物品数量从 1 变为 0 后状态永久停滞。
+
 ## 施法、引导和蓄力
 
 `施法`、`引导`、`蓄力` 都不是简单布尔值，而是时间值。它们使用同一个 `castCurve`：
@@ -224,6 +227,8 @@ if 引导 > 0:
 - `施法技能`：`UNIT_SPELLCAST_START` / `CHANNEL_START` / `EMPOWER_START` 时，把 `spellID` 映射到 `spellsList[spellID].index`。
 - `施法目标`：`UNIT_SPELLCAST_SENT` 根据 `targetName` 在队伍表里找到目标，写入队伍序号。
 
+注意施法目标的像素写入不是发生在 `UNIT_SPELLCAST_SENT` 中。该事件仅设置 `state.castTargetIndex`（main.lua 第 1416 行），实际的 `CreatTexture` 写入发生在后续的 `UNIT_SPELLCAST_START` / `CHANNEL_START` / `EMPOWER_START` 事件调用的 `updatePlayerCasting(spellID)` 中（main.lua 第 669-677 行）。因此如果只有 `UNIT_SPELLCAST_SENT` 触发而没有后续施法/引导/蓄力开始事件，施法目标字段的像素不会更新。
+
 注意当前 `UNIT_SPELLCAST_EMPOWER_STOP` 处理函数的条件疑似写反：它在 `unitTarget ~= "player"` 时清理玩家蓄力状态，而不是 `unitTarget == "player"`。如果游戏内蓄力状态出现残留，应优先检查这里。
 
 ## 目标相关状态
@@ -242,8 +247,8 @@ if 引导 > 0:
 | `3` | 敌方目标且有可进攻驱散的激怒增益 |
 | `11` | 友方目标 |
 | `12` | 友方目标且有可驱散魔法减益 |
-| `13` | 友方目标且有可驱散疾病减益 |
-| `14` | 友方目标且有可驱散诅咒减益 |
+| `13` | 友方目标且有可驱散诅咒减益 |
+| `14` | 友方目标且有可驱散疾病减益 |
 | `15` | 友方目标且有可驱散中毒减益 |
 
 敌方是否在范围内用 `self.state.specRange` 判断；友方目标按 40 码判断。`specRange` 来自 `Fuyutsui.rangeSpecID`，不是 Python 配置。
@@ -276,7 +281,9 @@ Python 读到的是 `maxRange` 的整数近似值，不是精确坐标距离。
 3. 对每个单位重新读取距离和战斗状态。
 4. 只有 `canAttack`、`maxRange <= specRange`，并且目标在战斗中时才计数。
 
-有两个例外：`testMap` 和 `testEncounter` 中的地图/战斗会放宽“必须在战斗中”的条件，当前源码里包括银月城和茂林古树。
+有两个例外：`testMap` 和 `testEncounter` 中的地图/战斗会放宽”必须在战斗中”的条件，当前源码里包括银月城和茂林古树。
+
+注意 `testMap` 和 `testEncounter` 是硬编码在 `main.lua` 第 1037-1042 行的 local 变量（非全局可配置表），第三方 mod 无法通过配置新增豁免条目。变量名以 `test` 为前缀暗示其调试/测试用途，不构成通用扩展机制。
 
 ## 队伍状态
 
@@ -315,9 +322,15 @@ state_dict["group"]["1"]["驱散"]
 
 字段名叫 `职责`，但实际输出还包含有效性和距离判断：队友死亡、不可协助、不在视野、或 `UnitInRange()` 为假时会写 0；只有有效且在范围内时才写 `roleMap` 的职责值。因此 Python 里 `职责 == 0` 不一定表示真实职责是 NONE，也可能表示这个单位当前不可用。
 
+`updateGroupInRangeAndHealth()` 每次调用只更新一个团队成员（main.lua 第 1116-1137 行），通过 `updateIndex` 轮转，而非全量刷新。因此 Python 端看到的 `group` 字典不是同一快照时刻的数据——不同成员的 `生命值`、`职责` 可能来自不同帧。此外，玩家自身在 `inRange` 判定中通过 `UnitIsUnit(unit, "player")` 直接返回 true（第 1125 行），不经过 `UnitInRange()` 检查，因此玩家自身始终被视为「在范围内」。
+
 队伍成员血量使用 `UnitHealthPercent(unit, false, obj.curve)`，并叠加 `inComingHeals` 和 `healAbsorb` 影响曲线。也就是说治疗逻辑读到的队友血量不是简单生命百分比，而是已经考虑了部分预估治疗和吸收修正后的显示值。
 
 当前源码还有一个配置细节：`loadPlayerBlocks()` 只读取 group 配置里的 `auras` 字段，但 `class/Evoker.lua` 的增辉队伍配置写成了 `aura = { ... }` 单数。按当前代码，这个 `先知先觉` 队伍光环不会被加载到 `blocks.groups.auras`，即使 Python `config.yml` 里有对应 `group` 字段，也会一直读不到有效剩余时间。
+
+除 `aura`/`auras` 字段名不匹配外，`Evoker.lua` 中 group 的 `num = 5` 与 `config.yml` 中 `num: 4` 也不一致。这意味着即使修正字段名，Lua 每名队员占据 5 个像素步长、Python 按 4 个步长解析，从第 2 个队员开始所有字段（`生命值`、`职责`、`驱散`、`先知先觉`）的像素偏移都会错位 1 个位置，队伍数据完全错乱。详见 `队友状态/readme.md`。
+
+另一个配置问题是 `config.yml` 中战士武器专精（专精 1）的 `顺劈斩高亮` 和 `致死高亮` 都配置为 `step: 25`（对应同一像素位置）。Python `build_state_dict` 按字段名分别读入状态字典，但两个字段读取相同的像素值，且 Lua 端只能往一个 step 写一个值，导致其中一个字段始终读到错误值。第三方作者应避免为不同字段配置相同 step。
 
 ## 职业专精额外 block 字段
 
