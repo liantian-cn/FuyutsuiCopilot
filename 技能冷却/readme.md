@@ -163,6 +163,8 @@ raw_B ≈ min(剩余秒数, 255)
 
 **注意：** `EvaluateRemainingDuration(curve255, 1)` 的第二参数 `1` 仅在法术冷却调用中出现（充能冷却 `GetSpellChargeDuration` 的调用不传此参数）。当前源码只能确认两处调用参数不同；这个参数在暴雪 API 内部的精确含义需要游戏内或官方文档进一步验证，不能只凭本仓库源码确定。
 
+另有 `creatColorCurveScaling` 用于生命/能量曲线。
+
 ### `isEnabled` 与 `fallbackColor` 的影响
 
 ```lua
@@ -250,7 +252,12 @@ spells:
 `build_state_dict()` 会把这些字段放进 `result["spells"]`：
 
 ```python
-spells_sub[spell_key] = int(raw) if raw is not None else 0
+if type_ == "int":
+    spells_sub[spell_key] = int(raw) if raw is not None else 0
+elif type_ == "bool":
+    spells_sub[spell_key] = bool(int(raw)) if raw is not None else False
+else:
+    spells_sub[spell_key] = int(raw) if raw is not None else 0
 result["spells"] = spells_sub
 ```
 
@@ -313,11 +320,16 @@ Python 里通常读作：
 }
 ```
 
-`CreateAutoLayoutBar()` 刷新时读取当前层数：
+`CreateAutoLayoutBar()` 刷新时根据 `valueType` 分两个分支读取当前值：
 
 ```lua
-local charges = C_Spell.GetSpellCharges(spellId)
-val = charges.currentCharges or 0
+if valueType == "charge" then
+    local charges = C_Spell.GetSpellCharges(spellId)
+    if not charges then return end
+    val = charges.currentCharges or 0
+elseif valueType == "castCount" then
+    val = C_Spell.GetSpellCastCount(spellId) or 0
+end
 bar:SetValue(val)
 ```
 
@@ -354,6 +366,7 @@ Python 端 `scan_screen_data()` 会：
 
 ```lua
 local startTimeSeconds, durationSeconds, enableCooldownTimer = C_Item.GetItemCooldown(itemID)
+if not enableCooldownTimer then return 255 end
 if startTimeSeconds > 0 then
     return durationSeconds - (GetTime() - startTimeSeconds)
 else
@@ -446,6 +459,7 @@ self.timeElapsed = self.timeElapsed + elapsed
 if self.timeElapsed > 0.2 then
     self:updateSpellCooldown()
     self:updateItemCoolDown()
+    -- ...
     self.timeElapsed = 0
 end
 ```
@@ -458,10 +472,10 @@ end
 
 | 事件 | 触发的处理 | 作用 |
 |---|---|---|
-| `SPELL_UPDATE_COOLDOWN` | `updateAuraBySpellCooldown(spellID)` | 冷却变化时同步光环过期时间 |
+| `SPELL_UPDATE_COOLDOWN` | `updateAuraBySpellCooldown(spellID)`（经 `issecretvalue` 过滤后调用） | 冷却变化时同步光环过期时间 |
 | `SPELL_UPDATE_CHARGES` | `SPELL_UPDATE_CHARGES` 事件处理（目前为空） | 充能变化时触发 bar 刷新 |
 | `SPELL_UPDATE_USES` | `SPELL_UPDATE_USES` 事件处理（目前为空） | `countBars` bar 已直接注册此事件刷新 |
-| `SPELL_UPDATE_ICON` | `updateAuraByIcon(spellID)` | 技能图标覆盖变化（如触发高亮） |
+| `SPELL_UPDATE_ICON` | `updateAuraByIcon(spellID)`（经 `issecretvalue` 过滤后调用） | 技能图标覆盖变化（如触发高亮） |
 | `COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED` | `updateAuraBySpellOverride(baseSpellID, overrideSpellID)` | 技能替换（天赋/被动替换技能 ID） |
 
 注意：`SPELL_UPDATE_CHARGES` 和 `SPELL_UPDATE_USES` 的事件处理函数当前为空（no-op）。它们已被注册但处理函数内没有实际逻辑。`countBars` 的 StatusBar 组件自行注册了这些事件并独立刷新，不依赖主框架的事件分发。
@@ -567,6 +581,7 @@ Fuyutsui 有一个名为 `cooldowns` 的用户可切换标志，通过 `/fu cd` 
 if blocks.state["爆发开关"] then
     self:CreatTexture(blocks.state["爆发开关"], c.cooldowns / 255 or 0)
 end
+-- 同时写入 AOE开关、输出模式、爆发药水开关
 ```
 
 2. `SwitchCooldown()`（用户使用 `/fu cd` 切换时）：
@@ -595,7 +610,7 @@ if 爆发 == 1 and 复仇之怒CD == 0:
 
 ## spellsList 的完整结构
 
-`Fuyutsui.spellsList`（定义在 `Fuyutsui/core/config.lua`，第 1-624 行）是一个覆盖所有职业的全局映射表，将法术 ID 映射到统一索引和失败跟踪标记：
+`Fuyutsui.spellsList`（定义在 `Fuyutsui/core/config.lua`，第 3-624 行）是一个覆盖所有职业的全局映射表，将法术 ID 映射到统一索引和失败跟踪标记：
 
 ```lua
 Fuyutsui.spellsList = {
@@ -637,7 +652,7 @@ blocks = {
 | `"aura"` | 直接存入光环配置 | `blocks.auras[k] = v` |
 | `"spell"` | 按 `v.charge` 决定是 `index` 还是 `charge`，同时登记 `forcedKnown`、`inSpellBook` | `blocks.spells[spellId]` |
 | `"group"` | 登记队伍显示的起始位置、成员数等 | `blocks.groups` |
-| `"countBars"` | 特殊的充能/计数 bar 配置（顶层键） | `blocks.countBars` |
+注意：`countBars` 不是通过 `v.type` 分派的。实际源码 `main.lua` 中先遍历 `v.type` 的 elseif 链处理 `block`/`aura`/`spell`/`group`，之后通过单独的 `k == "countBars"` 键名检查来匹配。所以 `countBars` 是独立于 `v.type` 分派链的顶层键匹配。
 
 注意：`loadPlayerBlocks()` 本身只构建并赋值 `self.blocks = blocks`，不负责写入所有像素，也没有 `updatePlayerCooldown()` 这个函数。后续像素刷新由调用方继续触发，例如：
 
