@@ -228,6 +228,12 @@ end
 
 `updateSpellKnown()` 会在启用插件、切换专精、天赋更新等结构性变化后调用。冷却数值本身不是靠这个函数刷新，而是靠 `OnUpdate` 周期刷新。
 
+### `C_Timer.After(1, ...)` 的 1 秒延迟
+
+`updateCooldownSpellKnown()` 并不立即重建 `spells` 表，而是用 `C_Timer.After(1, function() ... end)` 延迟 1 秒执行。这是因为切换专精或天赋后，游戏 API 可能需要一小段时间才能正确响应 `IsSpellKnown` / `IsSpellInSpellBook` 的查询。如果立即查询，可能得到错误结果，把已学会的技能当作未学会。
+
+延迟期间，`spells` 表已被清空（`spells = {}`），`updateSpellCooldown()` 遍历空表不产生任何输出。这意味着切换专精后约 1 秒内，所有技能冷却像素保持上一次的旧值或初始化值 `1`。Python 端在这段时间内读到的冷却值不可靠。
+
 ## Python 如何生成 spells 字典
 
 Python 端先通过 `GetPixels.py` 得到 `row_data`，再根据 `config.yml` 的当前职业/专精配置生成状态字典。
@@ -405,6 +411,26 @@ end
 
 物品数量与冷却共同影响 `updateItemCoolDown()` 的输出——有冷却但数量为 0 时写入 `1`。
 
+### 物品数量的双 ID 求和
+
+每种物品实际有两个 itemID（通常是普通版和高品质版），Lua 端把两个 ID 的数量相加：
+
+```lua
+self.state.HealthPotionCount = C_Item.GetItemCount(241304) + C_Item.GetItemCount(241305)
+self.state.HealthstoneCount = C_Item.GetItemCount(5512) + C_Item.GetItemCount(224464)
+```
+
+冷却计时只查其中一个 ID（通常是第一个），但数量检查用的是两个 ID 之和。这意味着：如果玩家背包里只有高品质版本（第二个 ID），数量检查会通过（> 0），但冷却计时查询的是第一个 ID——如果第一个 ID 从未被使用过，`GetItemCooldown` 会返回 `startTimeSeconds = 0`，即"无冷却"，Python 端读到 `0`（可用）。
+
+### 物品冷却在 config.yml 中的位置不一致
+
+物品冷却字段在 `config.yml` 中的位置因职业/专精而异，没有统一规则：
+
+- **放在 `spells:` 子字典内**：例如圣骑士（step 46）、牧师戒律（step 52）。Python 通过 `spells.get("大红冷却")` 读取。
+- **放在 spec 顶层**：例如死亡骑士邪恶（step 29）、术士恶魔学识（step 22）。Python 通过 `state_dict.get("大红冷却")` 读取。
+
+两种写法在 Lua 端没有区别——`updateItemCoolDown()` 只关心 `blocks.state["大红冷却"]` 是否存在，不关心它在 config.yml 里的层级。区别只在 Python 端的读取路径：`spells.get()` 还是 `state_dict.get()`。写 mod 时需要查看当前职业的 config.yml 确认具体位置。
+
 ## 冷却过程中变化时如何处理
 
 游戏内有些技能冷却会在过程中改变，例如冷却缩减、充能恢复加速、技能替换、光环影响、天赋变化或物品进入/结束冷却。Fuyutsui 不在 Python 端预测这些变化，而是持续重新读取游戏当前状态。
@@ -422,6 +448,8 @@ end
 
 因为 `updateSpellCooldown()` 每次都会重新调用 `GetSpellCooldownDuration(spellID)` 和 `GetSpellCooldown(spellID)`，所以它不依赖上一次保存的剩余时间。游戏端如果把冷却缩短、延长、重置或替换，下一个刷新周期就会把新值写进像素条。
 
+插件端不修改、不缩短、不重置任何冷却。它是一个纯读取层——每次 `updateSpellCooldown()` 都重新调用游戏 API 获取最新状态，然后把结果写入像素。冷却缩减、充能加速、冷却重置等效果完全由游戏引擎处理，插件端只是在下一个 0.2 秒刷新周期读到新值。
+
 插件端还注册了多种冷却或技能状态事件：
 
 | 事件 | 触发的处理 | 作用 |
@@ -431,6 +459,8 @@ end
 | `SPELL_UPDATE_USES` | `SPELL_UPDATE_USES` 事件处理（目前为空） | `countBars` bar 已直接注册此事件刷新 |
 | `SPELL_UPDATE_ICON` | `updateAuraByIcon(spellID)` | 技能图标覆盖变化（如触发高亮） |
 | `COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED` | `updateAuraBySpellOverride(baseSpellID, overrideSpellID)` | 技能替换（天赋/被动替换技能 ID） |
+
+注意：`SPELL_UPDATE_CHARGES` 和 `SPELL_UPDATE_USES` 的事件处理函数当前为空（no-op）。它们已被注册但处理函数内没有实际逻辑。`countBars` 的 StatusBar 组件自行注册了这些事件并独立刷新，不依赖主框架的事件分发。
 
 主冷却数值仍由 `OnUpdate` 每 0.2 秒调用 `updateSpellCooldown()` 兜底。
 
@@ -468,6 +498,26 @@ Fuyutsui 的处理函数 `updateAuraBySpellOverride(baseSpellID, overrideSpellID
 
 这个机制确保：当一个技能被另一个技能替换时，Python 端能通过光环状态感知到变化，而不是继续按照旧技能的冷却状态做决策。
 
+### 光环系统与冷却系统的区别
+
+Fuyutsui 有两套独立的状态跟踪机制，容易混淆：
+
+**冷却系统**（`updateSpellCooldown`）：
+- 数据来源：`C_Spell.GetSpellCooldownDuration` / `C_Spell.GetSpellCooldown`
+- 刷新方式：`OnUpdate` 每 0.2 秒轮询
+- 输出位置：顶部像素条的 `spells` 字段
+- Python 读取：`state_dict["spells"]["技能名"]`
+- 用途：技能是否可用、剩余冷却秒数
+
+**光环系统**（`updateAura` / `updateAuraBlocks`）：
+- 数据来源：职业配置中的光环声明 + 事件驱动的 `expirationTime` 设置
+- 刷新方式：每帧（高频）计算 `GetTime() - expirationTime` 的差值
+- 输出位置：顶部像素条的 `aura` 字段
+- Python 读取：`state_dict["光环名"]`
+- 用途：增益/减益持续时间、触发效果计时、叠加层数
+
+两者的联系是事件桥接：`SPELL_UPDATE_COOLDOWN` 事件不直接刷新冷却数值，而是触发 `updateAuraBySpellCooldown(spellID)` 来同步与该技能关联的光环状态。例如：某个爆发技能进入冷却 → 对应的增益光环开始计时。冷却数值本身由轮询独立处理，光环计时由事件 + 每帧计算独立处理。
+
 Python 端也不缓存旧冷却。`logic_gui.py` 的后台逻辑循环大约每 `0.2` 秒调用：
 
 ```python
@@ -475,6 +525,21 @@ state_dict = get_info()
 ```
 
 `get_info()` 会重新截图、重新解析 `row_data` 和 `bar_data`，再重建 `state_dict`。职业逻辑每轮看到的是最近一次截图解码结果。
+
+### Python 端的时间常量
+
+`logic_gui.py` 定义了几个关键时间常量：
+
+```python
+TOGGLE_INTERVAL = 0.1       # 按键发送后的最短间隔
+LOGIC_INTERVAL = 0.2        # get_info() 调用间隔（200ms）
+GUI_UPDATE_MS = 200         # GUI 刷新间隔
+TOGGLE_DEBOUNCE_SEC = 0.12  # 按键防抖间隔
+```
+
+`LOGIC_INTERVAL = 0.2` 与 Lua 端的 `0.2` 秒低频刷新周期对齐。这意味着最坏情况下，一个冷却变化从游戏发生到 Python 做出反应，延迟可达 Lua 刷新间隔 + Python 扫描间隔 ≈ 0.4 秒。实际延迟通常小于这个值，因为两端的 0.2 秒周期不是同步的。
+
+Python 端没有冷却预测或插值逻辑。`_state_dict` 每 200ms 被整体替换，不保留上一帧的冷却值。职业逻辑只基于最新一次扫描结果做决策。
 
 这套机制的特点是：
 
@@ -678,3 +743,19 @@ if spell_name and spells.get(spell_name, -1) == 0:
 ```
 
 这说明“法术失败”和“冷却”是联动的：只有失败技能仍然被判定为可用时，逻辑才会安排重试。这样可以避免一个技能失败后已经进入冷却，却仍被下一轮逻辑反复选择。
+
+## Python GUI 的冷却显示
+
+`logic_gui.py` 的"实时信息"窗口有一个"技能冷却"显示区域，每 200ms 从 `state_dict["spells"]` 读取当前专精的所有冷却字段并显示为数字：
+
+```python
+spells_data = sd.get("spells") or {}
+for name, lbl in cooldown_vars.items():
+    val = spells_data.get(name)
+    if val is None:
+        lbl.configure(text="-", text_color=FG_DIM)
+    else:
+        lbl.configure(text=str(int(val)), text_color=FG_LIGHT)
+```
+
+显示的技能列表来自 `config.yml` 中当前专精的 `spells:` 键名。这个 GUI 仅用于调试/观察，不影响战斗逻辑。职业逻辑函数不读取 GUI 状态，只读取 `state_dict`。
