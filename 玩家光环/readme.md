@@ -138,7 +138,7 @@ end
 
 核心机制通过 `updateAuraByIconMap()` 实现：调用 `C_Spell.GetOverrideSpell(spellID)` 检查当前覆盖法术 ID，如果与配置的 `overrideSpellID` 匹配则设置 `expirationTime`（若有 `duration`）并设 `isIcon = 2`；否则清除 `expirationTime` 并设 `isIcon = 1`。
 
-使用 `isIcon` 的光环在 `showKey` 中可以写 `"isIcon"` 来把状态值输出给 Python（值 0/1/2 直接写到像素，不像持续时间那样除 255）。Python 端可以据此区分"图标还没变化"和"图标已变化但没激活"。
+使用 `isIcon` 的光环在 `showKey` 中可以写 `"isIcon"` 来把状态值输出给 Python。和 `remaining`、`count` 一样，`isIcon` 的值也经过 `v / 255` 写入像素的 B 通道。Python 端读到的 B 通道整数值分别是 0、1、2（因为 `0/255 ≈ 0`、`1/255 ≈ 0.0039`、`2/255 ≈ 0.0078`，量化后恰好对应 0、1、2）。Python 端可以据此区分"图标还没变化"（0）和"图标已变化但没激活"（1）以及"激活中"（2）。
 
 `PLAYER_ENTERING_WORLD` 时，`updateAuraIconByEnteringWorld()` 会遍历所有 `e["图标改变"]` 下的 spellId 并调用 `updateAuraByIconMap()` 进行首次初始化。
 
@@ -505,6 +505,66 @@ bar 写法：
 
 还要注意，有些职业文件里同时存在 `type = "aura"` 的层数像素和 `countBars`，但 Python 最终读哪个，完全由 `config.yml` 决定。写 mod 时要把 Lua 像素位置、`config.yml` 字段、Python 逻辑使用的字段名一起核对。
 
+### `countBars` 的编码方式
+
+`countBars` 位于屏幕顶部第二行（`TOPLEFT, 0, -2`），与顶部第一行的普通像素用不同的编码方案。Lua 端通过 `CreateAutoLayoutBar()` 创建每条 bar，Python 端通过 `scan_screen_data()` 的左边界扫描（`scan_row_data_red_white_markers`）读取。
+
+#### 标记色与分隔色
+
+每条 bar 由一组颜色像素组成，结构如下：
+
+| 颜色 (RGB) | 作用 |
+|---|---|
+| `(1, 0, 0)` — 红色 | 段起始标记（与后面的 `(1, 1, 0)` 配对） |
+| `(1, 1, 0)` — 红黄色 | 段开始确认（紧跟红色之后，表示"这是一个新段"） |
+| `(255, 255, 255)` — 白色 | 值分隔符（白色像素后面的第一个非白色像素是实际值） |
+| `(200, 200, 200)` — 灰色 | 行终止标记（遇到后停止扫描该行） |
+
+#### 值的编码
+
+Lua 端为每个条目创建背景纹理时：
+
+```lua
+tex:SetColorTexture(1 / 255, currentRelativeIndex / 255, 0, 1)
+```
+
+- R 通道始终为 `1/255`（即 R=1）
+- G 通道为相对索引（`currentRelativeIndex / 255`）
+- B 通道始终为 0
+
+Python 端读取时，取白色分隔符后面第一个非白色像素的 G 通道值，再减 1 得到实际值：
+
+```python
+def _dict_value_from_raw_g(raw_g):
+    return max(0, int(raw_g) - 1)
+```
+
+例如：G 通道值为 3 时，实际 bar 值为 2（表示当前有 2 层充能）。
+
+#### 多条 bar 的排列
+
+`CreateAutoLayoutBar()` 为每条 bar 分配一段连续像素空间：
+
+```lua
+local startIndex = nextAvailableIndex
+local barWidth = maxValue * BAR_CONFIG.width
+nextAvailableIndex = startIndex + maxValue + 3  -- +maxValue 为值区域，+3 为灰色终点+间隔
+```
+
+每条 bar 的结构是：`[红色(1,0,0)] [红黄色(1,1,0)] [值像素 × maxValue] [灰色终点(200,200,200)]`。
+
+多条 bar 按创建顺序从左到右排列，共享一个灰色终点纹理（每次创建新 bar 时移动到新位置）。Python 端通过 `seg_idx`（段索引）区分不同 bar，`bar_data[1]` 对应 `config.yml` 中 `bar: 1` 的字段，`bar_data[2]` 对应 `bar: 2`，依此类推。
+
+#### `countBars` 与顶部普通像素的区别
+
+| 特性 | 顶部普通像素 | countBars |
+|---|---|---|
+| 位置 | 第一行 | 第二行（y=-2） |
+| 编码 | G=索引, B=值 | 红/红黄标记 + 白色分隔 + G 通道值-1 |
+| 用途 | 持续时间、层数、isIcon | 技能充能、施法次数 |
+| 刷新方式 | `updateAuraBlocks()` 每 0.2 秒 | WoW 事件驱动（`SPELL_UPDATE_CHARGES` 等） |
+| 读取方式 | `row_data[step]` | `bar_data[bar]` |
+
 ## 真实 Aura API 的位置
 
 Fuyutsui 也确实使用了 `C_UnitAuras`，但它不是玩家逻辑光环的主链路。
@@ -512,9 +572,26 @@ Fuyutsui 也确实使用了 `C_UnitAuras`，但它不是玩家逻辑光环的主
 玩家自身相关的特殊路径是"防御光环"：
 
 - `UNIT_AURA` 触发时，`GetDefensiveAuraInstanceID()` 只处理 `unit == "player"`。
-- 它读取 `C_UnitAuras.GetBuffDataByIndex(unit, i, "HELPFUL|BIG_DEFENSIVE")` 的前两个增益。
+- 它读取 `C_UnitAuras.GetBuffDataByIndex(unit, i, "HELPFUL|BIG_DEFENSIVE")` 的前两个增益。`"BIG_DEFENSIVE"` 是 WoW 的光环分类标签，指大型防御技能（如盾墙、圣佑术等）。
 - 找到后保存 `auraInstanceID`。
-- `GetDefensiveAuraDuration()` 再用 `C_UnitAuras.GetAuraDuration("player", auraInstanceID)` 取剩余时间并写入 `防御光环` 像素。
+- `GetDefensiveAuraDuration()` 再用 `C_UnitAuras.GetAuraDuration("player", auraInstanceID)` 取剩余时间。
+
+防御光环的时间映射使用 `C_CurveUtil` 而不是简单的 `/255`：
+
+```lua
+local curve255 = Fuyutsui:creatColorCurve(255, 255)
+-- creatColorCurve 内部：
+-- curve:AddPoint(0, CreateColor(0, 0, 0, 1))
+-- curve:AddPoint(255, CreateColor(0, 0, 255/255, 1))
+-- 即：0 秒 → B=0，255 秒 → B=1（量化后为 255）
+
+local duration = C_UnitAuras.GetAuraDuration("player", DefensiveAuraInstanceID)
+local auraduration = duration:EvaluateRemainingDuration(curve255)
+local _, _, b = auraduration:GetRGB()
+self:CreatTexture(blocks.state["防御光环"], b)
+```
+
+`EvaluateRemainingDuration(curve255)` 把剩余时间（0-255 秒）映射到一条线性颜色曲线上，输出一个颜色对象。取其 B 通道值后直接写入像素。这和逻辑光环的 `v / 255` 效果相同（都是把秒数映射到 0-255 的 B 通道），但走了 WoW 的曲线求值 API。
 
 队伍光环路径也会用 `C_UnitAuras`：
 
@@ -535,6 +612,6 @@ Fuyutsui 也确实使用了 `C_UnitAuras`，但它不是玩家逻辑光环的主
 - 逻辑光环多数是事件推导状态，和游戏真实 Buff/Debuff 图标可能存在短暂差异；要靠事件映射补齐刷新、消耗和清除路径。
 - 顶部像素只有 0-255 的整数通道。持续时间适合传秒级判断，不适合传高精度计时。
 - 新增光环除了在 `auras.lua` 中定义光环状态和事件映射外，还需要在职业 Lua 文件的 `ClassBlocks` 中添加 `type = "aura"` 的像素输出配置，以及在 Python `config.yml` 中添加对应的 `step` 字段映射。三者缺一不可。
-- 如果光环使用 `isIcon` 字段，注意在 `showKey` 中使用 `"isIcon"` 而不是 `"remaining"`；`isIcon` 的值 0/1/2 直接写入像素，不经过 `/255` 归一化以外的转换。
+- 如果光环使用 `isIcon` 字段，注意在 `showKey` 中使用 `"isIcon"` 而不是 `"remaining"`；`isIcon` 的值 0/1/2 也经过 `v / 255` 写入像素，Python 端读到的 B 通道整数值恰好是 0、1、2。
 - 不要在 `addAuras` 和 `updateAuras` 中对同一个 (spellId, event) 组合做重复映射；如果某个技能既"获得"又"更新"同一个光环，应该只放在一张映射表中，然后在对应的 `applyAuraMapForSpellEvent` 或 `updateAuraMapForSpellEvent` 中处理。
 - `updateAura()` 每帧执行，其中的计算开销会随光环数量线性增长。如果一个职业定义了非常多的逻辑光环（>50），理论上会影响帧率。目前各职业的光环数量都在合理范围内（≤20）。
