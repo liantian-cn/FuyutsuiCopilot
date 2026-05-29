@@ -18,7 +18,7 @@
 
 1. `Fuyutsui/class/*.lua` 在当前职业/专精的 `ClassBlocks` 里声明 `type = "group"`。
 2. `Fuyutsui/main.lua` 的 `loadPlayerBlocks()` 把该配置整理成 `blocks.groups`。
-3. `updateGroup()` 调用 `IterateGroupMembers()` 尝试建立 `group` 和 `groupList`。`updateGroup()` 有三条触发路径：（a）初始化时 `GetCharacterSpecInfo()` 直接调用 `self:updateGroup()`（main.lua:349）；（b）切专精/天赋时 `PLAYER_TALENT_UPDATE` 事件直接调用 `self:updateGroup()`（main.lua:1365-1368）；（c）队伍列表变化时 `GROUP_ROSTER_UPDATE` 事件触发更新。需注意 `GROUP_ROSTER_UPDATE` 路径存在 1 秒防抖（debounce）机制（main.lua:1642-1654）：每次事件触发时先取消上一计时器（`rosterTimer:Cancel()`），再新建 1 秒 `C_Timer.NewTimer` 延迟执行 `updateGroup()`。因此连续快速重新组队时，`updateGroup()` 仅执行一次，mod 作者不能假设「队伍成员变化后立即能读到新数据」。
+3. `updateGroup()` 调用 `IterateGroupMembers()` 尝试建立 `group` 和 `groupList`。`updateGroup()` 有四条触发路径：（a）初始化时 `GetCharacterSpecInfo()` 直接调用 `self:updateGroup()`（main.lua:349）；（b）切专精/天赋时 `PLAYER_TALENT_UPDATE` 事件直接调用 `self:updateGroup()`（main.lua:1365-1368）；（c）队伍列表变化时 `GROUP_ROSTER_UPDATE` 事件触发更新；（d）`updatePlayerBlocks()` 调用 `self:updateGroup()`（main.lua:244）。需注意 `GROUP_ROSTER_UPDATE` 路径存在 1 秒防抖（debounce）机制（main.lua:1642-1654）：每次事件触发时先取消上一计时器（`rosterTimer:Cancel()`），再新建 1 秒 `C_Timer.NewTimer` 延迟执行 `updateGroup()`。因此连续快速重新组队时，`updateGroup()` 仅执行一次，mod 作者不能假设「队伍成员变化后立即能读到新数据」。注意：初始化时 `GetCharacterSpecInfo()` 和 `updatePlayerBlocks()` 各调用一次 `updateGroup()`（分别通过 main.lua:349 和 main.lua:244），因此 `OnEnable` 中 `updateGroup` 会被执行两次。切专精时 `PLAYER_TALENT_UPDATE` 处理函数（main.lua:1365-1368）也通过 `updatePlayerSpecInfo` 间接调用和直接调用各一次，同样存在双重重入。mod 作者不应假设 `updateGroup()` 在任何生命周期内只会执行一次。
 4. `updateGroupInRangeAndHealth()`、`UNIT_AURA()`、`OnUpdateUnitAura()` 等函数读取 WoW API，并调用 `CreatTexture(index, value)` 写入顶部像素。
 5. `Fuyutsui/Fuyutsui/GetPixels.py` 用 `mss` 截取顶部一行，按像素 G/B 通道解码。
 6. `Fuyutsui/Fuyutsui/config.yml` 的 `group:` 配置把连续像素槽映射成 `state_dict["group"]`。
@@ -74,6 +74,8 @@ index = blocks.groups.start + (obj.index - 1) * blocks.groups.num + fieldOffset
 base_step = start + (i - 1) * num
 row_key = base_step + rel_step
 ```
+
+注意：GetPixels.py 第 352 行的注释写有 `-1`（`row_key=base_step+(rel_step-1)`），但实际代码第 370 行使用的是 `row_key = base_step + rel_step` 无 `-1`，与本文档公式一致。该注释具有误导性，mod 作者应以实际代码为准。
 
 Python 固定解析 30 个槽位，生成 `state_dict["group"]["1"]` 到 `state_dict["group"]["30"]`。Lua 只会主动刷新当前遍历到的队伍成员；如果某个像素槽没有被写入，Python 会读成 0，但当前源码没有在重新建组时清空全部 group 槽位，旧槽位可能残留。
 
@@ -163,7 +165,7 @@ self:CreatTexture(index, obj.healthPercent)
 
 注意当前 helpfulSpells 只覆盖了牧师（快速治疗、祈福、暗影愈合）、圣骑士（圣光术、圣光闪现）、德鲁伊（愈合）、萨满（治疗波）。织雾武僧的活血术/氤氲之雾和戒律牧师的苦修等主要单体治疗法术不在其中。
 
-`UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 会更新死亡/有效状态；实际血量像素还会在每帧的 `updateGroupInRangeAndHealth()` 中轮询刷新。
+`UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 会更新死亡/有效状态；实际血量像素还会在每帧的 `updateGroupInRangeAndHealth()` 中轮询刷新。注意：这些事件同样会更新玩家自身的血量显示。`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`（main.lua:1597-1598）在 `unit == "player"` 时调用 `self:updatePlayerHealth()`，与 `UNIT_HEALTH` / `UNIT_MAXHEALTH` / `UNIT_HEAL_PREDICTION` 的行为一致。
 
 ## 职责、距离、死亡和视野
 
@@ -174,7 +176,9 @@ Python 里的 `职责` 不是纯职责字段，它同时表达“这个单位当
 ```lua
 local inRange = UnitIsUnit(unit, "player") and true or UnitInRange(unit)
 local roleValue = roleMap[obj.role] and roleMap[obj.role] / 255 or 5 / 255
+local trueValue = CreateColor(0, 0, roleValue, 1)
 local booleanValue = EvaluateColorFromBoolean(inRange, trueValue, falseValueBlack)
+local _, _, b = booleanValue:GetRGB()
 self:CreatTexture(index, b)
 ```
 
@@ -249,7 +253,7 @@ end
 然后 `OnUpdateUnitAura()` 每 0.2 秒按 `blocks.groups.auras` 输出配置过的光环槽：
 
 - 一个槽可以配置多个 spellId。
-- `getMaxAuraByTable()` 会选过期时间最晚的那个光环。另外，该函数在迭代光环时会调用 `isSec()` 删除秘密值光环的缓存项（main.lua:1224-1225），看到秘密值光环时直接从 obj.aura 中移除。`isSec` 是 `main.lua:2` 定义的局部别名 `local isSec = issecretvalue`，对应 WoW API `issecretvalue`。暴雪对特定光环隐藏 spellId、targetName、unitGUID 等数据，`isSec()` 用于过滤这些受保护的秘密/遮蔽值（第 369 行也使用相同机制）。
+- `getMaxAuraByTable()` 会选过期时间最晚的那个光环。另外，该函数在迭代光环时会调用 `isSec()` 删除秘密值光环的缓存项（main.lua:1224-1225），看到秘密值光环时直接从 obj.aura 中移除。`isSec` 是 `main.lua:2` 定义的局部别名 `local isSec = issecretvalue`，对应 WoW API `issecretvalue`。暴雪对特定光环隐藏 spellId、targetName、unitGUID 等数据，`isSec()` 用于过滤这些受保护的秘密/遮蔽值（getMaxAuraByTable 第 1224 行在迭代光环时调用 isSec 移除秘密值缓存；UNIT_SPELLCAST_SENT 第 1411 行对 targetName 使用 isSec 过滤保护名）。
 - `expirationTime == 0` 视为永久光环。Lua 传入 value=1，经 SetColorTexture(0, index/255, value, 1) 归一化编码后，B 通道 8 位值为 1.0 * 255 = 255。因此 Python 读到的是 255，与持续 255 秒的光环无法区分。
 - 有持续时间时，用 `C_UnitAuras.GetAuraDuration(unit, auraInstanceID)` 转成剩余秒数，最多 255。
 - 没有匹配光环时写 0。
@@ -487,3 +491,8 @@ Python `config.yml` 中实际配置了这些 group 字段：
 | 2026-05-30 | 施法目标和治疗预估（isSec 出现处） | 同队友增益节遗漏 | 补充与第248行一致的 isSec 说明 |
 | 2026-05-30 | 队友可驱散状态（UNIT_AURA 说明） | 未提及驱散函数仅对已在 group 表中的单位生效 | 补充 getAuraDispelTypeColor 和 UNIT_AURA 的 group[unit] 检查说明 |
 | 2026-05-30 | 视野机制（inSight 说明） | 未点明 inSight 几乎永远为 true 的实战效果 | 补充说明 inSight 检查近乎形同虚设，mod 作者不应依赖
+| 2026-05-30 | 队友增益（isSec 行号） | 错误声称 isSec 在第 369 行使用，实际第 369 行为 updatePlayerBlocks | 将「第 369 行也使用相同机制」替换为准确的 getMaxAuraByTable 第 1224 行和 UNIT_SPELLCAST_SENT 第 1411 行引用 |
+| 2026-05-30 | 总体链路（第3步） | 遗漏第4条 updateGroup() 触发路径及双重重入行为 | 补充路径 (d) updatePlayerBlocks()，并说明初始化及切专精时的双重重入 |
+| 2026-05-30 | 职责代码片段 | 使用了未定义的 trueValue 变量和 b 变量 | 补充 local trueValue = CreateColor(...) 和 local _, _, b = booleanValue:GetRGB() |
+| 2026-05-30 | 队友槽位排列（Python 公式） | 未提及 GetPixels.py 第352行注释与实际代码不符 | 添加注说明注释含 -1 但实际执行无 -1 |
+| 2026-05-30 | 血量（事件说明） | 未提及 UNIT_HEAL_ABSORB_AMOUNT_CHANGED 等事件也会更新玩家自身血量 | 补充这些事件同样调用 self:updatePlayerHealth() 的说明 |
