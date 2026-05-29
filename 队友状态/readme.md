@@ -115,7 +115,7 @@ local i = reversed and numGroupMembers or (unit == 'party' and 0 or 1)
 | `inSightTimer` | 视野恢复定时器 | 否，仅 Lua 内部使用 |
 | `curveTimer` | 治疗吸收恢复定时器 | 否，仅 Lua 内部使用 |
 
-注意：这是一个比"残留风险"严重得多的运行时数据污染问题。main.lua:16-17 将 Fuyutsui.group 和 Fuyutsui.groupList 缓存到局部变量 group/groupList。updateGroup()（第 1302-1303 行）执行 self.group = {} 创建新表赋值给 Fuyutsui.group，但局部变量 group 仍指向旧表。后续所有对 group 和 groupList 的写入（第 1307 行 table.insert(groupList, unit)、第 1312 行 group[unit] = {...}）操作的都是旧表。而所有队友更新函数（updateUnitHealthInfo、updateGroupInRangeAndHealth、OnUpdateUnitAura 等）都通过局部变量访问旧表。结果是：
+注意：这是一个比"残留风险"严重得多的运行时数据污染问题。main.lua:16-17 将 Fuyutsui.group 和 Fuyutsui.groupList 缓存到局部变量 group/groupList。updateGroup()（第 1303 行）执行 self.group = {} 创建新表赋值给 Fuyutsui.group，但局部变量 group 仍指向旧表。后续所有对 group 和 groupList 的写入（第 1307 行 table.insert(groupList, unit)、第 1312 行 group[unit] = {...}）操作的都是旧表。而所有队友更新函数（updateUnitHealthInfo、updateGroupInRangeAndHealth、OnUpdateUnitAura 等）都通过局部变量访问旧表。结果是：
 
 1. groupList（旧表）永远不会被清空，每次 updateGroup() 调用后持续积累重复条目。
 2. 离队成员的条目永远保留在旧 group 表中，不会被移除。
@@ -138,14 +138,14 @@ obj.healthPercent = b
 self:CreatTexture(index, obj.healthPercent)
 ```
 
-正常情况下 Python 读到的 `生命值` 是 0-100 的百分比整数，不是当前血量数值。但当 `inComingHeals` 生效时，曲线基准会变成 `100 + inComingHeals - healAbsorb`，所以读数可能超过 100。
+正常情况下 Python 读到的 `生命值` 是 1-100 的百分比整数，不是当前血量数值。0% 血量时读数为 1 而非 0，这是因为 creatColorCurveScaling(100) 的曲线重叠导致最低点 B 值为 1/255。但当 `inComingHeals` 生效时，曲线基准会变成 `100 + inComingHeals - healAbsorb`，所以读数可能超过 100。
 
-当 b > 100 时，creatColorCurveScaling() 还会抬升曲线的最低点（main.lua:35-37）：最低点 B 值从 0 变为 (b - 100) / 255。例如 inComingHeals = 15 时 b = 115，0% 血量时 Python 读到 15 而非 0。这意味着死亡判断逻辑不能单纯依赖"职责=0"过滤，因为极端低血量时读数不是 0。
+当 b > 100 时，creatColorCurveScaling() 还会整条曲线上移（main.lua:35-37）：X=0 处 B 值从 0 变为 (b-100)/255，X=1 处 B 值从 100/255 变为 b/255，中间均匀线性插值。例如 inComingHeals = 15 时 b = 115，0% 血量时 Python 读到 15 而非 0。这意味着死亡判断逻辑不能单纯依赖"职责=0"过滤，因为极端低血量时读数不是 0。
 
 血量有两个修正量：
 
 - `inComingHeals`：玩家开始施放某些单体治疗时，临时提高目标血量读数，避免连续对同一个目标过量治疗。
-- `healAbsorb`：目标发生治疗吸收变化时，临时将血量曲线基准从 100 降低到 85（`healAbsorb = 15`），1 秒后恢复。
+- `healAbsorb`：目标发生治疗吸收变化时，临时将血量曲线基准从 100 降低到 85（`healAbsorb = 15`），默认 1 秒后恢复。但 updateUnitHealAbsorbCurve 每次触发都会取消旧定时器并重新计时（main.lua:1178-1187）。如果 UNIT_HEAL_ABSORB_AMOUNT_CHANGED 在短时间内多次触发（例如多个治疗吸收效果同时刷新），血量曲线基准为 85 的持续时间会被延长，超出上述 1 秒窗口。
 
 当前 `helpfulSpells` 只覆盖这些治疗法术：
 
@@ -156,10 +156,10 @@ self:CreatTexture(index, obj.healthPercent)
 | `82326` | 40 | 圣光术 |
 | `19750` | 15 | 圣光闪现 |
 | `8936` | 15 | 愈合 |
-| `186263` | 50 | 暗影愈合 |
+| `186263` | 50 | 暗影痊合 |
 | `77472` | 15 | 治疗波 |
 
-注意当前 helpfulSpells 只覆盖了牧师（快速治疗、祈福、暗影愈疗）、圣骑士（圣光术、圣光闪现）、德鲁伊（愈合）、萨满（治疗波）。织雾武僧的活血术/氤氲之雾和戒律牧师的苦修等主要单体治疗法术不在其中。
+注意当前 helpfulSpells 只覆盖了牧师（快速治疗、祈福、暗影痊合）、圣骑士（圣光术、圣光闪现）、德鲁伊（愈合）、萨满（治疗波）。织雾武僧的活血术/氤氲之雾和戒律牧师的苦修等主要单体治疗法术不在其中。
 
 `UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 会更新死亡/有效状态；实际血量像素还会在每帧的 `updateGroupInRangeAndHealth()` 中轮询刷新。
 
@@ -202,6 +202,8 @@ end
 
 `updateUnitInSight()` 会让该单位 `inSight = false`，1.5 秒后恢复 true。
 
+以上"无效时直接写 0"仅适用于职责槽。健康像素由 updateUnitHealthInfo 写入（main.lua:1119），该函数在职责槽之前执行且无死亡/无效检查。对于死亡单位，UnitHealthPercent 返回 0%，经由曲线映射后产生约 1 的 B 值（见血量节关于曲线重叠的说明），因此死亡单位的生命值像素为 1 而非 0。
+
 ## 队友能量和其他资源
 
 当前没有队友资源读取链路。
@@ -243,14 +245,14 @@ end
 然后 `OnUpdateUnitAura()` 每 0.2 秒按 `blocks.groups.auras` 输出配置过的光环槽：
 
 - 一个槽可以配置多个 spellId。
-- `getMaxAuraByTable()` 会选过期时间最晚的那个光环。
+- `getMaxAuraByTable()` 会选过期时间最晚的那个光环。另外，该函数在迭代光环时会调用 isSec() 删除秘密值光环的缓存项（main.lua:1224-1225），看到秘密值光环时直接从 obj.aura 中移除。
 - `expirationTime == 0` 视为永久光环。Lua 传入 value=1，经 SetColorTexture(0, index/255, value, 1) 归一化编码后，B 通道 8 位值为 1.0 * 255 = 255。因此 Python 读到的是 255，与持续 255 秒的光环无法区分。
 - 有持续时间时，用 `C_UnitAuras.GetAuraDuration(unit, auraInstanceID)` 转成剩余秒数，最多 255。
 - 没有匹配光环时写 0。
 
 这些字段在 Python 中直接表现为 `state_dict["group"][slot]["光环名"]` 的整数值。职业逻辑通常只判断是否为 0，或者选择没有某个光环的单位。
 
-全量光环更新只把前 5 个 `PLAYER|HELPFUL|RAID_IN_COMBAT` Buff 写入 `obj.aura`，不会先清空旧缓存。如果旧 aura 没有通过 `removedAuraInstanceIDs` 删除，缓存里可能暂时保留过期的 `auraInstanceID`。另外，`OnUpdateUnitAura()` 一开始要求 `blocks.groups.auras` 存在；因此只配置 `rejuv`、不配置 `auras` 的 group 块不会输出回春数量。这是一个结构性问题，不是简单的功能不可用——如果只配置 rejuv 而不配置 auras，OnUpdateUnitAura()（main.lua:1248-1249）在第 1249 行检查 blocks.groups.auras 为 nil 后直接 return，整个函数静默退出，rejuv 分支（第 1270 行）永远不可达。
+全量光环更新只把前 5 个 `PLAYER|HELPFUL|RAID_IN_COMBAT` Buff 写入 `obj.aura`，不会先清空旧缓存。Blizzard 的 GetBuffDataByIndex 按优先级、剩余时间等内部规则排序，不是简单的原始施放顺序。如果玩家在目标身上有超过 5 个可控的 HELPFUL Buff，仅前 5 个会被缓存到 obj.aura 中，后续的光环输出可能不完整。如果旧 aura 没有通过 `removedAuraInstanceIDs` 删除，缓存里可能暂时保留过期的 `auraInstanceID`。另外，`OnUpdateUnitAura()` 一开始要求 `blocks.groups.auras` 存在；因此只配置 `rejuv`、不配置 `auras` 的 group 块不会输出回春数量。这是一个结构性问题，不是简单的功能不可用——如果只配置 rejuv 而不配置 auras，OnUpdateUnitAura()（main.lua:1248-1249）在第 1249 行检查 blocks.groups.auras 为 nil 后直接 return，整个函数静默退出，rejuv 分支（第 1270 行）永远不可达。
 
 ### 当前配置的队友光环
 
@@ -378,9 +380,9 @@ end
 
 若当前专精配置了 `施法目标`，Lua 会把 `state.castTargetIndex` 写到玩家状态区；Python 读到的是目标 group 槽位编号。这个字段不在 `state_dict["group"]` 内，但它和队友治疗链路有关。
 
-读条开始时，`updateUnitIncomingHealsCurve(spellID)` 会按 `helpfulSpells` 给 `state.castTargetUnit` 增加临时血量修正；读条停止时清空（`UNIT_SPELLCAST_STOP` 调用 `updateUnitIncomingHealsCurve2()` 将所有队友的 `inComingHeals` 置为 0）。注意：引导停止（`UNIT_SPELLCAST_CHANNEL_STOP`）和蓄力停止（`UNIT_SPELLCAST_EMPOWER_STOP`）不会清空 `inComingHeals`。
+读条开始时，UNIT_SPELLCAST_START 调用 updateUnitIncomingHealsCurve(spellID)，按 helpfulSpells 给 state.castTargetUnit 增加临时血量修正；读条停止时 UNIT_SPELLCAST_STOP 调用 updateUnitIncomingHealsCurve2() 将所有队友的 inComingHeals 置为 0。注意：此机制仅在普通读条（UNIT_SPELLCAST_START/STOP）中生效。引导（UNIT_SPELLCAST_CHANNEL_START/STOP）和储力（UNIT_SPELLCAST_EMPOWER_START/STOP）的处理函数既不会设置也不会清理 inComingHeals。
 
-该重置由 updateUnitIncomingHealsCurve2()（main.lua:1201-1205）执行，它遍历 group 中所有成员将 inComingHeals 置为 0。
+该重置由 updateUnitIncomingHealsCurve2()（main.lua:1201-1205）执行，它遍历 group 中所有成员将 inComingHeals 置为 0。注意：由于双表分裂问题（见"队友列表来自哪里"节），updateUnitIncomingHealsCurve2() 使用局部变量 group（旧表）迭代。当前所有成员都写入旧表，因此函数能正确工作；但 Fuyutsui.group（新表）始终为空，是潜在的代码脆弱点。
 
 ## Python 如何使用队友信息
 
@@ -449,7 +451,7 @@ Python `config.yml` 中实际配置了这些 group 字段：
 - `updateGroupInRangeAndHealth()` 每帧只刷新一个队友的血量和职责槽，团队人数多时完整轮询需要多帧。
 - `OnUpdateUnitAura()` 每 0.2 秒刷新一次队友光环槽。
 - `UNIT_AURA()` 只在队友 aura 事件到来时刷新驱散槽；如果状态异常，可能要等下一次 aura 事件或重新建组。
-- `updateGroup()` 目前不会主动调用 `clearGroupBlocks()`；同时局部 `group`/`groupList` 没有被清空。队伍人数减少或重新建组时，这是一个比"残留风险"严重得多的运行时数据污染问题。main.lua:16-17 将 Fuyutsui.group 和 Fuyutsui.groupList 缓存到局部变量 group/groupList。updateGroup()（第 1302-1303 行）执行 self.group = {} 创建新表赋值给 Fuyutsui.group，但局部变量 group 仍指向旧表。后续所有对 group 和 groupList 的写入（第 1307 行 table.insert(groupList, unit)、第 1312 行 group[unit] = {...}）操作的都是旧表。而所有队友更新函数（updateUnitHealthInfo、updateGroupInRangeAndHealth、OnUpdateUnitAura 等）都通过局部变量访问旧表。结果是：
+- `updateGroup()` 目前不会主动调用 `clearGroupBlocks()`；同时局部 `group`/`groupList` 没有被清空。队伍人数减少或重新建组时，这是一个比"残留风险"严重得多的运行时数据污染问题。main.lua:16-17 将 Fuyutsui.group 和 Fuyutsui.groupList 缓存到局部变量 group/groupList。updateGroup()（第 1303 行）执行 self.group = {} 创建新表赋值给 Fuyutsui.group，但局部变量 group 仍指向旧表。后续所有对 group 和 groupList 的写入（第 1307 行 table.insert(groupList, unit)、第 1312 行 group[unit] = {...}）操作的都是旧表。而所有队友更新函数（updateUnitHealthInfo、updateGroupInRangeAndHealth、OnUpdateUnitAura 等）都通过局部变量访问旧表。结果是：
 
 1. groupList（旧表）永远不会被清空，每次 updateGroup() 调用后持续积累重复条目。
 2. 离队成员的条目永远保留在旧 group 表中，不会被移除。
@@ -461,4 +463,4 @@ Python `config.yml` 中实际配置了这些 group 字段：
 - 队友姓名只用于把 `UNIT_SPELLCAST_SENT` 的 `targetName` 映射回 group 槽位，不会传给 Python。
 - 队友 GUID 只用于 `UNIT_DIED` 匹配死亡，不会传给 Python。
 - `canAttack` 被保存进 group 对象，但当前队友输出链路没有使用它。
-- `目标类型` 里的友方可驱散值和队友 `驱散` 字段不是同一个输出槽。前者属于玩家状态里的目标信息，后者属于 group 成员信息。此外，两者使用的颜色曲线也不同：目标驱散使用 target.enemyCurve 和 target.friendCurve（main.lua:76-77），队友驱散使用 dispelCurve（main.lua:79），三者是独立的 C_CurveUtil.CreateColorCurve() 实例。
+- `目标类型` 里的友方可驱散值和队友 `驱散` 字段不是同一个输出槽。前者属于玩家状态里的目标信息，后者属于 group 成员信息。此外，两者使用的颜色曲线也不同：目标驱散使用 target.enemyCurve 和 target.friendCurve（main.lua:76-77），队友驱散使用 dispelCurve（main.lua:75），三者是独立的 C_CurveUtil.CreateColorCurve() 实例。
