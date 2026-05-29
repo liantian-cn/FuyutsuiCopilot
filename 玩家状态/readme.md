@@ -95,6 +95,8 @@ state.valid = valid and 1 / 255 or 0
 
 注意当前源码里有一个细节：`updateShapeshiftForm()` 把 `state.shapeshiftFormID` 存成 `shapeshiftFormID / 255`，但 `updatePlayerMounted()` 又拿它和原始 ID `27`、`3`、`29` 比较。这意味着“通过变形形态判断坐骑”的分支很可能不起作用；普通坐骑仍由 `IsMounted()` 判断。
 
+此外，在 `updatePlayerBlocks()` 初始化时，`updatePlayerMounted()`（第 221 行）在 `updateShapeshiftForm()`（第 238 行）之前调用。此时 `state.shapeshiftFormID` 尚为 nil（core.lua:376-380 初始 state 不含此字段），比较结果为 nil == 27/3/29（均为 false），使得形状变形-坐骑检测路径在初始化时双重失效。
+
 ## 生命值
 
 玩家血量由：
@@ -105,7 +107,7 @@ local _, _, b = healthPercent:GetRGB()
 self:CreatTexture(blocks.state["生命值"], b)
 ```
 
-`curve100` 把百分比映射到 B 通道，Python 读到的值通常是 1-100 的整数百分比。注意 curve100 在参数 b=100 时 z=0，产生三个控制点 (0,0)、(0,1/255)、(1,100/255)，第二个点覆盖第一个点后等效映射为 B=(1+99*t)/255。50% 血量时 B=50.5/255，Python 读到约 51 而非 50。除 100% 血量外，全范围存在约 +1 的系统偏移。`UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 都会触发玩家血量刷新。
+`curve100` 把百分比映射到 B 通道，Python 读到的值通常是 1-100 的整数百分比。注意 curve100 在参数 b=100 时 z=0，产生三个控制点 (0,0)、(0,1/255)、(1,100/255)，第二个点覆盖第一个点后等效映射为 B=(1+99*t)/255。50% 血量时 B=50.5/255，Python 读到约 51 而非 50。除 100% 血量外，全范围存在约 +1 的系统偏移。此外 `creatColorCurveScaling` 在 b>100 时还有一个分支（main.lua:35-37），创建仅含两个控制点 (0, (b-100)/255) 和 (1, b/255) 的曲线，产生不同于 b<=100 三控制点曲线的偏移起点。此分支在运行时可通过 updateUnitHealthInfo（line 1098 的 100 + inComingHeals - healAbsorb）在 inComingHeals > healAbsorb 时进入，常见于团队治疗场景。`UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 都会触发玩家血量刷新。
 
 这里读的是百分比，不是当前血量数值，也不是最大血量数值。Python 职业逻辑通常直接比较：
 
@@ -151,7 +153,7 @@ local specialPowerMap = {
 - 当 `UnitPower()` 不是受保护值，并且资源类型在 `specialPowerMap` 中时，写 `神圣能量`、`连击点`、`灵魂碎片`、`真气`、`精华能量` 等专用字段。
 - 当 `UnitPower()` 不是受保护值，并且资源类型不在 `specialPowerMap` 中时，当前源码没有在这个函数里写 `能量值`。
 
-注意：由于 SetTestSecret(1)（core.lua:350）使 isSec() 默认始终返回真，updatePlayerPower 中的 isSec(power) 检查恒为 true，因此分支 1（UnitPowerPercent -> 能量值）是实际运行的唯一路径。分支 2（specialPowerMap 中的 COMBO_POINTS/HOLY_POWER/ESSENCE/SOUL_SHARDS/CHI 映射到对应的专用资源字段）和分支 3（不写入）仅当执行 SetTestSecret(0) 后 isSec() 恢复正常的条件判断时才可能被触发。这意味着在默认运行时，Paladin 的「神圣能量」等专用资源字段不会通过此函数获得值。mod 作者如需读取原始资源点数，应考虑是否依赖此函数的特殊资源路径。
+注意：SetTestSecret(1) 强制 secret*RestrictionsForced 系 CVar 为 1 使 isSec() 对确实受保护的值类别（spellID、GUID、名字、光环数据）返回真，但玩家自身 UnitPower("player") 返回的简单整数不属于受保护类别。因此 isSec(power) 在运行时返回假，specialPowerMap 分支正常执行，通过 CreatTexture(blockIndex, power / 255) 写入 神圣能量/连击点/灵魂碎片/真气/精华能量。对于 Paladin/Druid/Evoker/Warlock/Monk 专精，if not isSec(power) and specialPower 分支是实际运行路径，分支 1（UnitPowerPercent -> 能量值）仅在资源类型不在 specialPowerMap 中时执行。
 
 因此写 Python 逻辑时不要假设同一轮截图里 `能量值` 和专用资源字段一定同时刷新。某些专精应优先读取自己的专用资源字段；只有需要通用主资源时再读 `能量值`。
 
@@ -175,7 +177,7 @@ local staggerPercent = damage / maxHealth * 100
 
 `isSec` / `isSecretValue` 是魔兽世界 API，用于判断某值（spellID、targetName、GUID、power 等）是否属于受保护内容。在大秘境、评级 PvP 等受保护场景中，部分 API 返回值会被隐藏，通过 `isSec` 检查可以避免依赖不可靠的数据。
 
-当前源码在 core.lua:350 的 OnEnable 初始化中调用 SetTestSecret(1)，强制设置 secret*RestrictionsForced 系 CVar 为 1（共六个：secretChallengeModeRestrictionsForced、secretCombatRestrictionsForced、secretEncounterRestrictionsForced、secretMapRestrictionsForced、secretPvPMatchRestrictionsForced、secretAuraDataRestrictionsForced），使 isSec() 默认对所有值均返回真。这意味着下文描述的所有 isSec 拦截行为（包括 UNIT_SPELLCAST_SUCCEEDED/FAILED/SENT 的跳过及 UNIT_DIED 的保护）在非受保护内容中也始终生效。若手动执行 SetTestSecret(0)，isSec() 将恢复条件性行为——仅在真正受保护内容（大秘境、评级 PvP）中返回真；普通场景中 isSec 相关拦截将不再触发，此时 specialPowerMap 分支（如神圣能量、连击点）才能通过 updatePlayerPower 的第二分支实际写入。
+当前源码在 core.lua:350 的模块级作用域调用 SetTestSecret(1)，强制设置 secret*RestrictionsForced 系 CVar 为 1（共六个：secretChallengeModeRestrictionsForced、secretCombatRestrictionsForced、secretEncounterRestrictionsForced、secretMapRestrictionsForced、secretPvPMatchRestrictionsForced、secretAuraDataRestrictionsForced）。这使 isSec() 对确实受保护的值类别（spellID、GUID、名字、光环数据等）返回真；但简单类型值如 UnitPower("player") 返回的玩家自身资源整数值不属于受保护类别。若手动执行 SetTestSecret(0)，isSec() 将恢复条件性行为——仅在真正受保护内容（大秘境、评级 PvP）中返回真。同时注意：SetTestSecret(1) 在模块加载时执行（早于 OnEnable），与 OnEnable 中的事件注册无直接时序依赖。这意味着下文描述的所有 isSec 拦截行为（包括 UNIT_SPELLCAST_SUCCEEDED/FAILED/SENT 的跳过及 UNIT_DIED 的保护）在非受保护内容中也始终生效。
 
 当前源码中 `isSec` 在以下位置影响事件处理：
 
@@ -263,7 +265,11 @@ if 引导 > 0:
 
 注意施法目标的像素写入不是发生在 `UNIT_SPELLCAST_SENT` 中。该事件仅设置 `state.castTargetIndex`（main.lua 第 1416 行），实际的 `CreatTexture` 写入发生在后续的 `UNIT_SPELLCAST_START` / `CHANNEL_START` / `EMPOWER_START` 事件调用的 `updatePlayerCasting(spellID)` 中（main.lua 第 669-677 行）。因此如果只有 `UNIT_SPELLCAST_SENT` 触发而没有后续施法/引导/蓄力开始事件，施法目标字段的像素不会更新。
 
-注意当前 `UNIT_SPELLCAST_EMPOWER_STOP` 处理函数的条件疑似写反：它在 `unitTarget ~= "player"` 时清理玩家蓄力状态，而不是 `unitTarget == "player"`。如果游戏内蓄力状态出现残留，应优先检查这里。
+注意当前 `UNIT_SPELLCAST_EMPOWER_STOP` 处理函数的条件疑似写反：它使用 `unitTarget ~= "player"` 而非 `== "player"`。完整控制流分析如下：
+（1）unitTarget="player"：第一分支 `~="player"` 为假，第二分支 `=="target"` 也为假 → state.empowering 和 target.empowering 均泄漏；
+（2）unitTarget="target"：第一分支为真，错误地清除 state.empowering，target.empowering 泄漏；
+（3）对比 CHANNEL_STOP（第 1461-1471 行）的正确模式 `if unitTarget == "player" ... elseif unitTarget == "target"` 可清楚看出设计缺陷。
+如果游戏内蓄力状态出现残留，应优先检查这里。
 
 此外，`state.casting`/`channeling`/`empowering` 三个状态纯由 WoW 事件驱动（START 置 true、STOP 置 false），`OnUpdate` 中对应的 `updatePlayerCastingInfo`/`channelingInfo`/`empowerInfo`（第 397-455 行）在 `Duration` 对象为 nil 时只写 0 到纹理，不会自行清除对应状态标记。若 STOP 事件因断线、UI 重载、事件抑制等丢失，状态标记将永久滞留为 true，导致每帧访问失效的 `Duration` 对象（第 1817-1819 行）。该风险涉及系统可靠性，mod 作者在做容错分析时应注意这一点。同时 `EMPOWER_STOP` 处理函数（第 1484-1494 行）使用 `unitTarget ~= 'player'` 而非 `== 'player'` 的条件来清除玩家蓄力状态，属于明显的条件反转，使玩家自身蓄力清除路径更加脆弱。
 
@@ -379,7 +385,9 @@ state_dict["group"]["1"]["驱散"]
 
 `updateGroupInRangeAndHealth()` 每次调用只更新一个团队成员（main.lua 第 1116-1137 行），通过 `updateIndex` 轮转，而非全量刷新。因此 Python 端看到的 `group` 字典不是同一快照时刻的数据——不同成员的 `生命值`、`职责` 可能来自不同帧。此外，玩家自身在 `inRange` 判定中通过 `UnitIsUnit(unit, "player")` 直接返回 true（第 1125 行），不经过 `UnitInRange()` 检查，因此玩家自身始终被视为「在范围内」。
 
-注意 `updateIndex` 轮转存在一个边缘风险：当 `GROUP_ROSTER_UPDATE` 使队伍人数减少后，若 `updateIndex` 超出新的 `numUnits` 范围，`groupList[updateIndex]` 为 nil 触发的早期 return（第 1118 行）会跳过 `updateIndex` 自增（第 1134 行），导致该索引永久停滞，其他成员无法被更新。虽然 `group` 与 `groupList` 由 `updateGroup()` 原子重建使此路径在正常流程中不会触发，但在 `GROUP_ROSTER_UPDATE` 与下一个 `OnUpdate` 帧之间的瞬态窗口或异常状态下可能出现。
+注意 `updateIndex` 轮转存在一个在正常游戏流程中可触发的停滞风险：当队伍/团队人数减少时（如队员退队/下线），`updateGroup()` 重建 `groupList` 但不重置 `updateIndex`。若 `updateIndex` 超出新的 `numUnits` 范围，`groupList[updateIndex]` 为 nil 触发第 1118 行的早期 return（跳过第 1134 行的 `updateIndex` 自增），导致该索引永久停滞，后续成员无法更新。
+
+注意 `IterateGroupMembers`（core.lua:352-366）在队伍与团队模式下对玩家自身的包含规则不同：队伍模式下迭代器以 i=0 开始并返回 'player'；团队模式下 i=1 开始，不返回 'player'。因此玩家自身的 group 条目（含 specRole 覆盖的职责，main.lua:1309-1311）仅在队伍模式下写入。mod 作者从 `state_dict["group"]` 读取玩家自身数据时应注意此模式差异。
 
 队伍成员血量使用 `UnitHealthPercent(unit, false, obj.curve)`，并叠加 `inComingHeals` 和 `healAbsorb` 影响曲线。也就是说治疗逻辑读到的队友血量不是简单生命百分比，而是已经考虑了部分预估治疗和吸收修正后的显示值。
 
@@ -425,6 +433,8 @@ state_dict["group"]["1"]["驱散"]
 | 用户开关 | `爆发开关`、`AOE开关`、`输出模式`、`爆发药水开关`、`延迟` |
 | 物品状态 | `大红冷却`、`治疗石冷却`、`鲁莽药水冷却` |
 | 英雄天赋 | `英雄天赋` |
+
+注意 ClassBlocks 中的 `powerType` 字段（如 Paladin.lua 专精3 声明的 `powerType = "MANA"`）是死配置——`loadPlayerBlocks()`（line 272-273）使用 `if type(v) ~= 'table' or not v.type then` 明确跳过非条目字段，`updatePlayerPowerType()`（line 505-508）总是使用 `UnitPowerType("player")` 运行时 API 而非 ClassBlocks 的 powerType。mod 作者不应依赖 ClassBlocks powerType 来预期能量类型变更。
 
 源码的 `updateItemCoolDown()` 还支持 `大蓝冷却` 和 `圣光潜力冷却`，但当前职业 `ClassBlocks` 和 `config.yml` 中没有看到它们作为实际输出字段。
 
@@ -524,7 +534,7 @@ C_UnitAuras.GetAuraDuration("player", state.DefensiveAuraInstanceID)
 - `type: "int"`：`int(raw)`
 - `spells:`：放到 `state_dict["spells"]`
 - `group:`：按队伍 block 段落展开到 `state_dict["group"]`
-- `step: bar`：从第二行 `countBars` 读取，不从顶部普通像素读取。countBars 是独立于顶部普通像素的渲染行（block.lua 第58-156行）：通过 `CreateAutoLayoutBar()` 创建 StatusBar 帧，支持 `castCount`（施法次数）和 `charge`（充能层数）两种 valueType；背景色块用 G 通道编码索引，末尾有灰色终点标记。多个职业配置（DeathKnight、DemonHunter、Priest、Monk、Shaman、Warlock 的 ClassBlocks）使用 `countBars` 键定义条计数器。countBars 的 StatusBar 在 block.lua 第 78 行注册了三个事件（`SPELL_UPDATE_USES`、`PLAYER_ENTERING_WORLD`、`SPELL_UPDATE_CHARGES`）驱动刷新，并通过第 86-88 行的 `spellIdToBar[spellId]` 缓存实现重复性检查（同一法术 ID 只创建一个 StatusBar）。Python 端（GetPixels.py 第140-236行）通过扫描第一列红色标记定位 countBars 行，按红色分段、白色分隔、灰色终止的规则解析各条段的值。
+- `step: bar`：从第二行 `countBars` 读取，不从顶部普通像素读取。countBars 是独立于顶部普通像素的渲染行（block.lua 第58-156行）：通过 `CreateAutoLayoutBar()` 创建 StatusBar 帧，支持 `castCount`（施法次数）和 `charge`（充能层数）两种 valueType；背景色块用 G 通道编码索引，编码存在 -1 偏移。Lua 端从 i=-1（红色标记，G=0/255）开始迭代遍历背景色块，第一个数据值（i=0）映射到 G=1/255。Python 端通过 `_dict_value_from_raw_g(raw_g) = max(0, int(raw_g) - 1)` 将 G 通道值减 1 得到实际数值。此偏移产生自 Lua 端在数据块之前插入了一个额外标记块（i=-1）。mod 作者实现自定义 countBars 解析器时必须考虑此转换。末尾有灰色终点标记。多个职业配置（DeathKnight、DemonHunter、Priest、Monk、Shaman、Warlock 的 ClassBlocks）使用 `countBars` 键定义条计数器。countBars 的 StatusBar 在 block.lua 第 78 行注册了三个事件（`SPELL_UPDATE_USES`、`PLAYER_ENTERING_WORLD`、`SPELL_UPDATE_CHARGES`）驱动刷新，并通过第 86-88 行的 `spellIdToBar[spellId]` 缓存实现重复性检查（同一法术 ID 只创建一个 StatusBar）。Python 端（GetPixels.py 第140-236行）通过扫描第一列红色标记定位 countBars 行，按红色分段、白色分隔、灰色终止的规则解析各条段的值。
 
 注意专精/天赋切换时存在两条路径，影响 countBars 的残留行为。(1) `UNIT_SPELLCAST_SUCCEEDED`（spellID 200749/384255）先调用 `ClearAllFuyutsuiBars()`（block.lua 第 159-183 行）清空 `createdBars` 和 `spellIdToBar`，1 秒后执行 `updatePlayerSpecInfo`，`countBars` 正确重建。(2) `PLAYER_TALENT_UPDATE` 事件（UI 天赋切换、休息区非法术操作）直接调用 `updatePlayerSpecInfo()`（main.lua 第 1365-1367 行）和其内部的 `clearAllTextures()`，不执行 `ClearAllFuyutsuiBars()`。旧专精的 `createdBars` 和 `spellIdToBar` 未被清空，若新旧专精的法术 ID 分布不同，旧 `countBars` 可能在顶部像素区残留显示，新 `countBars` 可能因 `spellIdToBar` 碰撞（第 86-88 行的重复性检查）而不被创建。
 
@@ -612,3 +622,12 @@ C_UnitAuras.GetAuraDuration("player", state.DefensiveAuraInstanceID)
 | 2026-05-30 | Iota | 物品状态为什么也算 block | Theta 终审+一审 | 扩充 value=1 歧义描述为四条路径（含无冷却路径） |
 | 2026-05-30 | Iota | 能量值和职业资源 | Theta 终审+一审 | 补充 SetTestSecret(1) 导致专用资源分支默认不可达的注释 |
 | 2026-05-30 | Iota | 法术失败 | Theta 终审+一审 | 补充 failedSpell/failedSpellId/failedSpellTimer 三个模块级局部变量说明 |
+| 2026-05-30 | Iota | 能量值和职业资源 | Theta 终审 | 修正 SetTestSecret(1) 使 isSec 始终为真的错误结论，说明 UnitPower 简单整数不受保护，specialPowerMap 分支正常执行 |
+| 2026-05-30 | Iota | 受保护值(isSec)对事件链的影响 | Theta 终审 | 修正 SetTestSecret(1) 调用位置（模块级而非 OnEnable）及语义描述（仅受保护类别返回真） |
+| 2026-05-30 | Iota | 队伍状态 | Theta 终审 | 更正 updateIndex 停滞风险：正常流程中可触发（队员退队/下线），删除「正常流程中不会触发」断言 |
+| 2026-05-30 | Iota | 队伍状态 | Theta 终审 | 新增 IterateGroupMembers 队伍/团队模式下玩家自身包含规则差异说明 |
+| 2026-05-30 | Iota | 有效性如何计算 | Theta 终审 | 补充 updatePlayerMounted() 在初始化时先于 updateShapeshiftForm() 调用导致双重失效 |
+| 2026-05-30 | Iota | 施法、引导和蓄力 | Theta 终审 | 扩展 EMPOWER_STOP 条件反转为完整控制流分析（两个 unitTarget 分支对比 CHANNEL_STOP） |
+| 2026-05-30 | Iota | Python 端的结构 | Theta 终审 | 补充 countBars G 通道编码 -1 偏移解码规则及 Python 端 `_dict_value_from_raw_g` 转换公式 |
+| 2026-05-30 | Iota | 生命值 | Theta 终审 | 补充 creatColorCurveScaling b>100 分支的两控制点曲线及入径（inComingHeals > healAbsorb） |
+| 2026-05-30 | Iota | 职业专精额外 block 字段 | Theta 终审 | 补充 ClassBlocks powerType 为死配置说明（不被 loadPlayerBlocks/updatePlayerPowerType 消费） |
