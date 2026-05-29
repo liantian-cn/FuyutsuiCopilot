@@ -9,6 +9,8 @@
 - 队友增益只记录玩家自己施加、且职业配置声明过的少量光环，不会扫描队友身上所有 Buff。
 - 队友可驱散魔法不是只看“有没有魔法 Debuff”，还会结合当前玩家是否学会对应驱散法术；无能力驱散时输出 0。
 - 当前 `Evoker.lua` 的增辉队友配置有两处不一致：光环字段写成了 `aura`，但 `main.lua` 读取的是 `v.auras`；Lua 侧 `num = 5`，Python `config.yml` 侧 `num = 4`。因此 `先知先觉` 队友光环很可能不会被写入像素，而且第 2 个及后续增辉队友槽位可能错位。这一点需要实测或修正源码后再视为可用。
+- 当前圣骑士防护也存在 Lua/Python 配置不一致：Lua 侧声明了 `type = "group"`，但 Python `config.yml` 没有配置防骑 `group:`，因此防骑不会生成有意义的 `state_dict["group"]`。
+- 当前 `updateGroup()` 还有一个需要注意的源码问题：`main.lua` 顶部缓存了局部 `group` 和 `groupList`，但 `updateGroup()` 重新赋值的是 `self.group` 和 `self.groupList`。因此旧成员、重复成员列表和旧像素槽位都有残留风险，不能简单假设“非当前队友槽位一定为 0”。
 
 ## 总体链路
 
@@ -16,7 +18,7 @@
 
 1. `Fuyutsui/class/*.lua` 在当前职业/专精的 `ClassBlocks` 里声明 `type = "group"`。
 2. `Fuyutsui/main.lua` 的 `loadPlayerBlocks()` 把该配置整理成 `blocks.groups`。
-3. `updateGroup()` 调用 `IterateGroupMembers()` 建立 `group` 和 `groupList`。
+3. `updateGroup()` 调用 `IterateGroupMembers()` 尝试建立 `group` 和 `groupList`。
 4. `updateGroupInRangeAndHealth()`、`UNIT_AURA()`、`OnUpdateUnitAura()` 等函数读取 WoW API，并调用 `CreatTexture(index, value)` 写入顶部像素。
 5. `Fuyutsui/Fuyutsui/GetPixels.py` 用 `mss` 截取顶部一行，按像素 G/B 通道解码。
 6. `Fuyutsui/Fuyutsui/config.yml` 的 `group:` 配置把连续像素槽映射成 `state_dict["group"]`。
@@ -73,7 +75,7 @@ base_step = start + (i - 1) * num
 row_key = base_step + rel_step
 ```
 
-Python 固定解析 30 个槽位，生成 `state_dict["group"]["1"]` 到 `state_dict["group"]["30"]`。Lua 只会给实际队伍成员写像素，其他槽位一般读成 0。
+Python 固定解析 30 个槽位，生成 `state_dict["group"]["1"]` 到 `state_dict["group"]["30"]`。Lua 只会主动刷新当前遍历到的队伍成员；如果某个像素槽没有被写入，Python 会读成 0，但当前源码没有在重新建组时清空全部 group 槽位，旧槽位可能残留。
 
 ## 队友列表来自哪里
 
@@ -108,6 +110,8 @@ local i = reversed and numGroupMembers or (unit == 'party' and 0 or 1)
 | `inComingHeals` | 玩家正在读条的单体治疗预估 | 影响血量曲线 |
 | `aura` | 玩家施加在该单位上的光环缓存 | 用于输出职业队友光环 |
 
+注意：`main.lua` 顶部把 `Fuyutsui.group` 和 `Fuyutsui.groupList` 保存成了局部变量，后续大部分队友逻辑使用的是这些局部表。`updateGroup()` 内部却写了 `self.group = {}` 和 `self.groupList = {}`，没有清空局部 `group`/`groupList` 本身。按当前源码阅读，重新建组时旧单位和重复列表项可能继续留在局部表里；第三方作者如果排查队友槽位异常，应同时检查这个 Lua 表残留问题和顶部像素残留问题。
+
 ## 血量
 
 队友血量由 `updateUnitHealthInfo(unit)` 输出：
@@ -119,7 +123,7 @@ local _, _, b = healthPercent:GetRGB()
 self:CreatTexture(index, obj.healthPercent)
 ```
 
-正常情况下 Python 读到的 `生命值` 是 0-100 的百分比整数，不是当前血量数值。
+正常情况下 Python 读到的 `生命值` 是 0-100 的百分比整数，不是当前血量数值。但当 `inComingHeals` 生效时，曲线基准会变成 `100 + inComingHeals - healAbsorb`，所以读数可能超过 100。
 
 血量有两个修正量：
 
@@ -219,11 +223,13 @@ end
 
 - 一个槽可以配置多个 spellId。
 - `getMaxAuraByTable()` 会选过期时间最晚的那个光环。
-- `expirationTime == 0` 视为永久光环，写入 `255`。
+- `expirationTime == 0` 视为永久光环；当前源码实际写入 `1`，不是 `255`。
 - 有持续时间时，用 `C_UnitAuras.GetAuraDuration(unit, auraInstanceID)` 转成剩余秒数，最多 255。
 - 没有匹配光环时写 0。
 
 这些字段在 Python 中直接表现为 `state_dict["group"][slot]["光环名"]` 的整数值。职业逻辑通常只判断是否为 0，或者选择没有某个光环的单位。
+
+全量光环更新只把前 5 个 `PLAYER|HELPFUL|RAID_IN_COMBAT` Buff 写入 `obj.aura`，不会先清空旧缓存。如果旧 aura 没有通过 `removedAuraInstanceIDs` 删除，缓存里可能暂时保留过期的 `auraInstanceID`。另外，`OnUpdateUnitAura()` 一开始要求 `blocks.groups.auras` 存在；因此只配置 `rejuv`、不配置 `auras` 的 group 块不会输出回春数量。
 
 ### 当前配置的队友光环
 
@@ -379,6 +385,7 @@ Python 解码后的结构大致如下：
 | `get_unit_with_role_and_without_aura_name()` | 找指定职责且缺少某光环的单位 |
 | `get_lowest_health_unit_without_aura()` | 找缺少某光环且血量最低的单位 |
 | `get_lowest_health_unit_with_aura()` | 找有某光环且血量最低的单位 |
+| `get_lowest_health_unit_with_any_aura()` | 找拥有任意指定光环且血量最低的单位 |
 | `get_lowest_health_unit_with_aura_count()` | 找某光环数值等于指定值的最低血单位 |
 | `get_unit_with_aura()` | 找拥有指定光环且持续时间最高的单位 |
 | `count_units_without_aura_below_health()` | 统计缺少某光环且低血的单位 |
@@ -395,6 +402,7 @@ Python `config.yml` 中实际配置了这些 group 字段：
 |---|---:|---:|---|
 | 圣骑士/神圣 | 70 | 6 | `生命值`、`职责`、`驱散`、`永恒之火`、`救世道标`、`圣光道标` |
 | 圣骑士/惩戒 | 70 | 3 | `生命值`、`职责`、`驱散` |
+| 圣骑士/防护 | 未配置 | 未配置 | Python 未配置 `group:`；Lua 侧有 `num = 3` 的 group 块，但不会被 Python 解析 |
 | 牧师/戒律 | 70 | 5 | `生命值`、`职责`、`驱散`、`救赎`、`真言术：盾` |
 | 牧师/神圣 | 70 | 5 | `生命值`、`职责`、`驱散`、`愈合祷言`、`恢复` |
 | 萨满/恢复 | 70 | 6 | `生命值`、`职责`、`驱散`、`激流`、`大地之盾`、`大地生命` |
@@ -409,8 +417,8 @@ Python `config.yml` 中实际配置了这些 group 字段：
 - `updateGroupInRangeAndHealth()` 每帧只刷新一个队友的血量和职责槽，团队人数多时完整轮询需要多帧。
 - `OnUpdateUnitAura()` 每 0.2 秒刷新一次队友光环槽。
 - `UNIT_AURA()` 只在队友 aura 事件到来时刷新驱散槽；如果状态异常，可能要等下一次 aura 事件或重新建组。
-- `updateGroup()` 目前不会主动调用 `clearGroupBlocks()`，队伍人数减少时旧槽位是否残留需要实测；Python 固定解析 30 个槽位，所以逻辑侧依赖 `职责 == 0` 过滤无效单位。
-- 全量光环更新只扫描前 5 个 `PLAYER|HELPFUL|RAID_IN_COMBAT` Buff；增量更新依赖 `UNIT_AURA` 的 added/updated/removed 列表。
+- `updateGroup()` 目前不会主动调用 `clearGroupBlocks()`；同时局部 `group`/`groupList` 没有被清空。队伍人数减少或重新建组时，旧像素槽位、旧单位和重复列表项都可能残留；Python 固定解析 30 个槽位，逻辑侧依赖 `职责 == 0` 过滤无效单位时要特别小心。
+- 全量光环更新只扫描前 5 个 `PLAYER|HELPFUL|RAID_IN_COMBAT` Buff，且不会清空旧缓存；增量更新依赖 `UNIT_AURA` 的 added/updated/removed 列表。
 - 队友姓名只用于把 `UNIT_SPELLCAST_SENT` 的 `targetName` 映射回 group 槽位，不会传给 Python。
 - 队友 GUID 只用于 `UNIT_DIED` 匹配死亡，不会传给 Python。
 - `canAttack` 被保存进 group 对象，但当前队友输出链路没有使用它。
