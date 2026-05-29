@@ -178,6 +178,29 @@ spells = state_dict.get("spells") or {}
 
 大多数逻辑用 `== 0` 判断技能可用，例如 `致死打击 == 0`、`神圣震击CD == 0`、`纯净术 == 0`。
 
+## 字段名不是自动推导
+
+`XX`、`XX充能`、`XX层数` 这些名字不是代码通过字符串结尾自动识别出来的，而是手写配置形成的约定。
+
+具体来说：
+
+- Lua 职业文件里的 `name = "压制"` 主要是给人读的说明；真正决定像素位置的是表索引和 `spellId`。
+- `loadPlayerBlocks()` 只根据 `type = "spell"`、`spellId`、`charge = true` 生成 `blocks.spells`，不会拼接或解析 `压制充能` 这种名字。
+- Python 端 `config.yml` 里的键名才是 `state_dict["spells"]` 里的字段名，例如 `压制`、`压制充能`。
+- `XX层数` 也不是由 `XX` 自动生成，而是 `config.yml` 中单独写的普通字段，通常通过 `step: bar` 指向第二条 bar 的某个计数字段。
+
+因此，三类字段的关系是人工维护的：
+
+```yaml
+spells:
+  压制: {step: 40, type: "int" }
+  压制充能: {step: 41, type: "int" }
+
+苦修层数: {step: bar, bar: 1, type: "int"}
+```
+
+如果 Lua 的 step、`config.yml` 的字段名、Python 职业逻辑里的 `spells.get("字段名")` 不一致，Fuyutsui 不会自动发现或修正，逻辑会读到错误值或 `-1` 默认值。写第三方 mod 文档或示例时，应把这些字段当作显式接口，而不是依赖命名后缀规则。
+
 ## 充能冷却和充能层数
 
 Fuyutsui 里跟“充能”有关的数据有两类，不能混为一谈。
