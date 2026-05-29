@@ -51,13 +51,15 @@ Python 端读取到的是：
 | `生命值` | `UnitHealthPercent("player", false, curve100)` | 血量百分比，通常 0-100 |
 | `能量值` | `UnitPowerType` + `UnitPowerPercent` / `UnitPower` | 当前主资源，可能是百分比或小资源点数 |
 | `一键辅助` | `C_AssistedCombat.GetNextCastSpell()` | 暴雪一键辅助推荐法术在 `spellsList` 中的索引 |
-| `法术失败` | `UNIT_SPELLCAST_FAILED` + `spellsList[spellID].failed` | 最近失败法术索引，1.5 秒后清空 |
+| `法术失败` | `UNIT_SPELLCAST_FAILED` + `isUsable` + `spellsList[spellID].failed` | 最近失败法术索引，1.5 秒后清空 |
 | `目标类型` | 目标敌友、距离、死亡、可驱散类型 | 0、1-3、11-15 |
 | `队伍类型` | `UnitInRaid("player")` / `UnitInParty("player")`（46 为硬编码哨兵值，非 API 返回值） | 单人 0；小队 46；团队为玩家 raid index |
 | `队伍人数` | `GetNumGroupMembers()` | 当前队伍/团队人数 |
 | `首领战` | `ENCOUNTER_START/END` + `bossID` 映射 | 当前首领内部编号，非 encounterID 原值 |
 | `难度` | encounter 事件的 `difficultyID` | 游戏难度 ID |
 | `英雄天赋` | 遍历 `Fuyutsui.heroTalents` 的已知法术 | 英雄天赋内部编号 |
+
+> 注意 `updateSpellFailed()` 写入法术失败像素前还需满足 `isUsable = true`（即 `C_Spell.IsSpellUsable()` 返回可用）。当技能处于冷却中（`IsSpellUsable()` 返回 false）时，即使收到 `UNIT_SPELLCAST_FAILED` 事件，法术失败像素也不会写入。
 
 ## 有效性如何计算
 
@@ -165,6 +167,26 @@ local maxHealth = UnitHealthMax("player")
 local staggerPercent = damage / maxHealth * 100
 ```
 
+## 受保护值(isSec)对事件链的影响
+
+`isSec` / `isSecretValue` 是魔兽世界 API，用于判断某值（spellID、targetName、GUID、power 等）是否属于受保护内容。在大秘境、评级 PvP 等受保护场景中，部分 API 返回值会被隐藏，通过 `isSec` 检查可以避免依赖不可靠的数据。
+
+当前源码中 `isSec` 在以下位置影响事件处理：
+
+| 事件 | 函数 | isSec 检查目标 | 行为差异 |
+|---|---|---|---|
+| `UNIT_SPELLCAST_SUCCEEDED` | `updateDrinkStatus()` | `isSec(spellID)` | 若 spellID 受保护，跳过 `updateDrinkStatus`、`updateFailedSpellBySuccess`、`updateAuraBySuccess`，整个回调直接 return |
+| `UNIT_SPELLCAST_FAILED` | `updateSpellFailed()` | `isSec(spellID)` | 若 spellID 受保护，跳过 `updateSpellFailed`，不记录法术失败 |
+| `UNIT_SPELLCAST_SENT` | 事件处理器 | `isSec(targetName)` | 若目标名受保护，阻止设置 `state.castTargetIndex`/`castTargetName`/`castTargetUnit` |
+
+在大秘境或评级 PvP 等受保护内容中运行 mod 时，这些拦截的具体影响包括：
+
+- `updateDrinkStatus` 被跳过 -> 饮水状态无法更新（不置 true 也不置 false），`有效性` 的饮水判断可能基于过期数据。
+- `updateFailedSpellBySuccess` 被跳过 -> 成功施法无法清除之前的法术失败记录。
+- `updateAuraBySuccess` 被跳过 -> 成功施法无法触发光环更新。
+- `updateSpellFailed` 被跳过 -> 法术失败像素不会写入，`法术失败` 字段停留在旧值或 0。
+- `castTargetIndex`/`castTargetName`/`castTargetUnit` 不被设置 -> 施法目标追踪在大秘境中不可用。
+
 ## 移动和移动速度
 
 Fuyutsui 只注册了：
@@ -256,6 +278,8 @@ if 引导 > 0:
 | `14` | 友方目标且有可驱散疾病减益 |
 | `15` | 友方目标且有可驱散中毒减益 |
 
+> 注意：源代码（main.lua 第 921-922 行）的注释将 13 与 14 的标签写反（13=疾病、14=诅咒）。文档值经 `friendCurve` 映射确认是正确的（`dispelAbilities[2]`=诅咒驱散对应 13=诅咒减益，`dispelAbilities[3]`=疾病驱散对应 14=疾病减益），读者在对照源码时需注意此注释错误。同时 `dispelCapabilities` 表（main.lua 第 166-167 行）也存在同类注释错位（2=疾病驱散、3=诅咒驱散）。
+
 敌方是否在范围内用 `self.state.specRange` 判断；友方目标按 40 码判断。`specRange` 来自 `Fuyutsui.rangeSpecID`，不是 Python 配置。
 
 ### 目标生命值和距离
@@ -293,6 +317,8 @@ Python 读到的是 `maxRange` 的整数近似值，不是精确坐标距离。
 ## 队伍状态
 
 `队伍类型` 和 `队伍人数` 是顶层字段。治疗逻辑还会读取 `state_dict["group"]` 子字典。
+
+注意 `GROUP_ROSTER_UPDATE` 事件处理函数内置了 `C_Timer.NewTimer(1, function()...)` 实现的 1 秒防抖延迟：每次触发会取消前一个计时器再重新创建。队伍变更后至少需 1 秒才能反映到 `state_dict` 中。
 
 Lua 端 `updateGroup()` 会遍历队伍成员，记录：
 
@@ -337,6 +363,14 @@ state_dict["group"]["1"]["驱散"]
 `updateGroupInRangeAndHealth()` 每次调用只更新一个团队成员（main.lua 第 1116-1137 行），通过 `updateIndex` 轮转，而非全量刷新。因此 Python 端看到的 `group` 字典不是同一快照时刻的数据——不同成员的 `生命值`、`职责` 可能来自不同帧。此外，玩家自身在 `inRange` 判定中通过 `UnitIsUnit(unit, "player")` 直接返回 true（第 1125 行），不经过 `UnitInRange()` 检查，因此玩家自身始终被视为「在范围内」。
 
 队伍成员血量使用 `UnitHealthPercent(unit, false, obj.curve)`，并叠加 `inComingHeals` 和 `healAbsorb` 影响曲线。也就是说治疗逻辑读到的队友血量不是简单生命百分比，而是已经考虑了部分预估治疗和吸收修正后的显示值。
+
+`inComingHeals` 的完整生命周期如下：
+
+- **数据来源**：`helpfulSpells` 表（main.lua 第 65-73 行）硬编码了特定法术 ID 到治疗量的映射，例如快速治疗=15、圣光术=40 等。
+- **设置时机**：施法开始时，`UNIT_SPELLCAST_START` 事件调用 `updateUnitIncomingHealsCurve(spellID)`，按 spellID 查表后设置目标成员的 `inComingHeals`。
+- **清除时机**：施法结束时，`UNIT_SPELLCAST_STOP` 事件调用 `updateUnitIncomingHealsCurve2()`，将所有成员的 `inComingHeals` 置 0。
+
+因此 `inComingHeals` 仅在该特定法术的施法窗口内有效，施法结束后立即归零。`helpfulSpells` 只覆盖表中硬编码的治疗法术，自定义或非标准治疗法术不会产生 `inComingHeals` 影响。
 
 当前源码还有一个配置细节：`loadPlayerBlocks()` 只读取 group 配置里的 `auras` 字段，但 `class/Evoker.lua` 的增辉队伍配置写成了 `aura = { ... }` 单数。按当前代码，这个 `先知先觉` 队伍光环不会被加载到 `blocks.groups.auras`，即使 Python `config.yml` 里有对应 `group` 字段，也会一直读不到有效剩余时间。
 
@@ -418,6 +452,8 @@ end
 
 这类字段的详细冷却语义已经在 `技能冷却/readme.md` 中展开。
 
+另外注意 `updateItemCoolDown()` 中使用 `math.min(1, remainingTime / 255)` 写入冷却值，当冷却剩余时间超过 255 秒时 value 被钳制为 1，与 else 分支「物品不可用」时写入的值相同。Python 端读到 value=1 无法区分「刚进入冷却」和「还剩数百秒冷却」。mod 作者不应依赖 value=1 来唯一判断冷却状态。
+
 ## 防御光环是特殊例外
 
 `防御光环` 在恶魔猎手复仇专精里是 `type = "block"`，但它的数据来源是 WoW 的真实 Aura API：
@@ -456,7 +492,7 @@ C_UnitAuras.GetAuraDuration("player", state.DefensiveAuraInstanceID)
 - `type: "int"`：`int(raw)`
 - `spells:`：放到 `state_dict["spells"]`
 - `group:`：按队伍 block 段落展开到 `state_dict["group"]`
-- `step: bar`：从第二行 `countBars` 读取，不从顶部普通像素读取。countBars 是独立于顶部普通像素的渲染行（block.lua 第58-156行）：通过 `CreateAutoLayoutBar()` 创建 StatusBar 帧，支持 `castCount`（施法次数）和 `charge`（充能层数）两种 valueType；背景色块用 G 通道编码索引，末尾有灰色终点标记。多个职业配置（DeathKnight、DemonHunter、Priest、Monk、Shaman、Warlock 的 ClassBlocks）使用 `countBars` 键定义条计数器。Python 端（GetPixels.py 第140-236行）通过扫描第一列红色标记定位 countBars 行，按红色分段、白色分隔、灰色终止的规则解析各条段的值。
+- `step: bar`：从第二行 `countBars` 读取，不从顶部普通像素读取。countBars 是独立于顶部普通像素的渲染行（block.lua 第58-156行）：通过 `CreateAutoLayoutBar()` 创建 StatusBar 帧，支持 `castCount`（施法次数）和 `charge`（充能层数）两种 valueType；背景色块用 G 通道编码索引，末尾有灰色终点标记。多个职业配置（DeathKnight、DemonHunter、Priest、Monk、Shaman、Warlock 的 ClassBlocks）使用 `countBars` 键定义条计数器。countBars 的 StatusBar 在 block.lua 第 78 行注册了三个事件（`SPELL_UPDATE_USES`、`PLAYER_ENTERING_WORLD`、`SPELL_UPDATE_CHARGES`）驱动刷新，并通过第 86-88 行的 `spellIdToBar[spellId]` 缓存实现重复性检查（同一法术 ID 只创建一个 StatusBar）。Python 端（GetPixels.py 第140-236行）通过扫描第一列红色标记定位 countBars 行，按红色分段、白色分隔、灰色终止的规则解析各条段的值。
 
 所以新增第三方字段时要同时对齐三处：
 
@@ -498,6 +534,8 @@ C_UnitAuras.GetAuraDuration("player", state.DefensiveAuraInstanceID)
 - `延迟` 只由 `/fu delay` 写入，不是 `updatePlayerConfig()` 的初始化输出项。
 - 职业 Lua 里有字段不代表 Python 一定能读到；必须同步 `config.yml`。
 - Python `config.yml` 里有字段也不代表 Lua 一定会写；必须检查是否存在对应 `blocks.state["字段名"]` 更新路径。
+- 在大秘境和评级 PvP 等受保护场景中，`isSec` 会拦截多项事件处理，导致饮水状态、法术失败记录、施法目标追踪等功能不可用或基于过期数据运行。依赖这些功能的 mod 需注意受保护内容中的行为差异。
+- `inComingHeals` 只覆盖 `helpfulSpells` 表中硬编码的治疗法术，自定义或非标准治疗法术不会产生 `inComingHeals` 曲线影响。
 
 ## 修订记录
 
@@ -513,3 +551,11 @@ C_UnitAuras.GetAuraDuration("player", state.DefensiveAuraInstanceID)
 | 2026-05-30 | Iota | Python 端的结构 | Theta 终审 | countBars 职业列表补充萨满 |
 | 2026-05-30 | Iota | 疾病判断 | Theta 终审 | 补充 UI_ERROR_MESSAGE 中文字符串语言依赖警告 |
 | 2026-05-30 | Iota | 队伍状态 | Theta 终审 | roleMap 补充回退值 5，新增 updateUnitInSight 机制说明 |
+| 2026-05-30 | Iota | 能量值和职业资源之后 | Theta 终审 | 新增「受保护值(isSec)对事件链的影响」独立子节，说明 isSec 在 UNIT_SPELLCAST_SUCCEEDED/FAILED/SENT 中的拦截行为及对大秘境场景的影响 |
+| 2026-05-30 | Iota | 法术失败 | Theta 终审 | 补充 isUsable 前提条件，说明冷却中技能不写入法术失败像素 |
+| 2026-05-30 | Iota | 目标类型 | Theta 终审 | 补充 main.lua 第 921-922 行及第 166-167 行注释错位说明 |
+| 2026-05-30 | Iota | 队伍状态 | Theta 终审 | 补充 GROUP_ROSTER_UPDATE 1 秒防抖延迟说明 |
+| 2026-05-30 | Iota | 队伍状态 | Theta 终审 | 展开 inComingHeals 完整生命周期（helpfulSpells 表、施法开始/结束设置清零） |
+| 2026-05-30 | Iota | 物品状态为什么也算 block | Theta 终审 | 补充 updateItemCoolDown 中 math.min(1, remainingTime/255) 数值钳制说明 |
+| 2026-05-30 | Iota | Python 端的结构 | Theta 终审 | 补充 countBars 注册事件（SPELL_UPDATE_USES/PLAYER_ENTERING_WORLD/SPELL_UPDATE_CHARGES）及 spellIdToBar 重复性检查机制 |
+| 2026-05-30 | Iota | 写 mod 时要注意 | Theta 终审 | 新增 isSec 受保护场景影响提示和 inComingHeals 硬编码法术限制提示 |

@@ -177,7 +177,7 @@ raw_B ≈ min(剩余秒数, 255)
 
 第二参数 `1` 在暴雪 API 内部的精确含义需要游戏内或官方文档进一步验证，不能只凭本仓库源码确定。
 
-另有 `creatColorCurveScaling` 用于百分比类值的归一化映射（当前仅用于生命值曲线，如 `updatePlayerHealth` 静态调用、`updateUnitHealthInfo` 动态调用和 `updateTargetHealth`（main.lua:1005）均使用 `curve100`）。能量曲线由独立的 `CreatPowerCurve` 创建，使用的是 `creatColorCurve` 而非此函数。
+另有 `creatColorCurveScaling` 用于百分比类值的归一化映射（当前仅用于生命值曲线）。`updatePlayerHealth`（main.lua:470）和 `updateTargetHealth`（main.lua:1005）使用固定的 `curve100` 常量；而 `updateUnitHealthInfo`（main.lua:1098）创建独立的动态曲线 `creatColorCurveScaling(100 + obj.inComingHeals - obj.healAbsorb)`，不使用 `curve100`。能量曲线由独立的 `CreatPowerCurve` 创建，使用的是 `creatColorCurve` 而非此函数。
 
 ### `isEnabled` 与 `fallbackColor` 的影响
 
@@ -385,7 +385,7 @@ Python 端 `scan_screen_data()` 会：
 
 因此 `countBars` 适合表示小整数计数，例如当前充能层数、施放次数、残片数量等；普通技能冷却仍走顶部像素条的 `spells`。
 
-注意偏移量：Lua 端背景色块绿色通道编码为 `(i+1)/255`（`block.lua:111`），Python 端 `_dict_value_from_raw_g` 通过减 1 还原（`GetPixels.py:189-190`）。此 +1/-1 偏移意味着 Python 读到 bar 值 0 对应 Lua 的 i=-1（左填充），而非第一个有效分段。
+注意偏移量：Lua 端背景色块绿色通道编码为 `(i+1)/255`（`block.lua:117`），Python 端 `_dict_value_from_raw_g` 通过 `max(0, val-1)` 还原（`GetPixels.py:189-190`）。此 +1/-1 偏移的设计目的是确保 i=0 编码为绿色通道值 1（与黑色 G=0 可区分），而非将 bar 值 0 映射到 i=-1（左填充）。实际上 i=-1（G=0）和 i=0（G=1）均解码为 bar 值 0，且解析器在 StatusBar 白色填充之后读取第一个非白色像素，不会读到左填充位置的值。
 
 ## 物品冷却
 
@@ -832,3 +832,6 @@ for name, lbl in cooldown_vars.items():
 | 2026-05-30 | 事件表 SPELL_UPDATE_CHARGES | Theta 审核意见 | 作用列改为"事件处理函数为空，bar 刷新由 countBars StatusBar 自行注册"，同步调整注释 |
 | 2026-05-30 | 充能冷却和充能层数（第371行后） | Theta 审核意见 | 补充充能分支不调用 EvaluateColorFromBoolean、不受 isOnGCD 归零影响的行为差异 |
 | 2026-05-30 | issecretvalue 守卫机制 | Theta 审核意见 | 补充说明 SetTestSecret(1) 同时设置 scriptErrors 和 doNotFlashLowHealthWarning |
+| 2026-05-30 | countBars 偏移说明 | 多代理审核（Theta 综合审核） | i=-1（左填充）对应 bar 值 0 的结论错误，改为正确的设计目的说明：+1/-1 偏移确保 i=0 编码为 G=1（与黑色 G=0 可区分），i=-1 和 i=0 均解码为 bar 值 0 |
+| 2026-05-30 | creatColorCurveScaling 段 | 多代理审核（Theta 综合审核） | "均使用 curve100" 错误，改为区分：updatePlayerHealth 和 updateTargetHealth 使用固定 curve100，updateUnitHealthInfo 使用独立动态曲线 |
+| 2026-05-30 | countBars 编码代码引用 | 多代理审核（Theta 综合审核） | block.lua:111（变量定义行）修正为 block.lua:117（实际 SetColorTexture 调用行） |

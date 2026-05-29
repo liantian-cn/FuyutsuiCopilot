@@ -20,6 +20,10 @@
 2. `Fuyutsui/main.lua` 的 `loadPlayerBlocks()` 把该配置整理成 `blocks.groups`。
 3. `updateGroup()` 调用 `IterateGroupMembers()` 尝试建立 `group` 和 `groupList`。`updateGroup()` 有四条触发路径：（a）初始化时 `GetCharacterSpecInfo()` 直接调用 `self:updateGroup()`（main.lua:349）；（b）切专精/天赋时 `PLAYER_TALENT_UPDATE` 事件直接调用 `self:updateGroup()`（main.lua:1365-1368）；（c）队伍列表变化时 `GROUP_ROSTER_UPDATE` 事件触发更新；（d）`updatePlayerBlocks()` 调用 `self:updateGroup()`（main.lua:244）。需注意 `GROUP_ROSTER_UPDATE` 路径存在 1 秒防抖（debounce）机制（main.lua:1642-1654）：每次事件触发时先取消上一计时器（`rosterTimer:Cancel()`），再新建 1 秒 `C_Timer.NewTimer` 延迟执行 `updateGroup()`。因此连续快速重新组队时，`updateGroup()` 仅执行一次，mod 作者不能假设「队伍成员变化后立即能读到新数据」。注意：初始化时 `GetCharacterSpecInfo()` 和 `updatePlayerBlocks()` 各调用一次 `updateGroup()`（分别通过 main.lua:349 和 main.lua:244），因此 `OnEnable` 中 `updateGroup` 会被执行两次。切专精时 `PLAYER_TALENT_UPDATE` 处理函数（main.lua:1365-1368）也通过 `updatePlayerSpecInfo` 间接调用和直接调用各一次，同样存在双重重入。mod 作者不应假设 `updateGroup()` 在任何生命周期内只会执行一次。
 4. `updateGroupInRangeAndHealth()`、`UNIT_AURA()`、`OnUpdateUnitAura()` 等函数读取 WoW API，并调用 `CreatTexture(index, value)` 写入顶部像素。
+
+4a. `updateGroupInRangeAndHealth()` 由 `OnUpdate`（main.lua:1822）每帧调用一次，每次只处理一个成员。当前处理的成员由全局变量 `updateIndex`（main.lua:19）控制，每处理完一个成员递增一次，到达列表末尾后重置为 1。
+
+注意：当 `updateIndex > #groupList` 时（即队伍列表缩小但 updateIndex 未重置），该函数在 main.lua:1117-1118 处因 `groupList[updateIndex]` 返回 nil 而提前 return，且不递增 updateIndex，导致刷新停滞。此风险在当前源码中因双表分裂问题（groupList 从不缩小）被掩盖，但修复后必须在 updateGroup() 末尾配套重置 updateIndex = 1。详见「队友列表来自哪里」节第 131 行的说明。（另见「需要注意的细节」节相关补充说明。）
 5. `Fuyutsui/Fuyutsui/GetPixels.py` 用 `mss` 截取顶部一行，按像素 G/B 通道解码。
 6. `Fuyutsui/Fuyutsui/config.yml` 的 `group:` 配置把连续像素槽映射成 `state_dict["group"]`。
 7. `Fuyutsui/Fuyutsui/utils.py` 和职业逻辑用 `state_dict["group"]` 选择治疗、驱散、补 Buff 的目标。
