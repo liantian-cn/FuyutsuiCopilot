@@ -83,9 +83,11 @@ state.valid = valid and 1 / 255 or 0
 | `isDead` | `PLAYER_DEAD`、`PLAYER_ALIVE`、`PLAYER_UNGHOST`，以及初始化时 `UnitIsDeadOrGhost("player")` | 死亡或灵魂状态时无效 |
 | `mounted` | `PLAYER_MOUNT_DISPLAY_CHANGED`、`UPDATE_SHAPESHIFT_FORM(S)`，以及初始化 | 使用 `IsMounted()`，并尝试把部分变形形态视为坐骑 |
 | `isChatOpen` | hook 默认聊天框 `EditBox` 焦点 | 打开聊天输入时无效，避免误发按键 |
-| `drinkStatus` | `UNIT_SPELLCAST_SUCCEEDED` 检查法术名”饮水”或”进食饮水” | 饮水后置 true，20 秒后清空；移动也会清空 |
+| `drinkStatus` | `UNIT_SPELLCAST_SUCCEEDED` 检查法术名”饮水”或”进食饮水” | 饮水后置 true，20 秒后清空；移动也会清空（注意：法术名称为中文客户端本地化值；英文客户端分别为 “Refreshment” 和 “Food and Drink”，此比较在非中文客户端永不为真。） |
 
 注意 `updateDrinkStatus()` 的 else 分支会在法术名不是”饮水”或”进食饮水”时立即将 `drinkStatus` 置 false 并取消已有计时器。由于 `UNIT_SPELLCAST_SUCCEEDED` 对每次玩家成功施法都调用 `updateDrinkStatus(spellID)`，任何非饮水法术（包括战斗中的输出技能）都会立即清空 `drinkStatus`，实际窗口期远短于 20 秒。
+
+由于 `C_Spell.GetSpellName` 返回客户端本地化的法术名称，此 drinkStatus 检测机制仅在 zhCN/zhTW 客户端有效。跨语言 mod 应用 spellID 直接检测或检查客户端区域。
 
 注意当前源码里有一个细节：`updateShapeshiftForm()` 把 `state.shapeshiftFormID` 存成 `shapeshiftFormID / 255`，但 `updatePlayerMounted()` 又拿它和原始 ID `27`、`3`、`29` 比较。这意味着“通过变形形态判断坐骑”的分支很可能不起作用；普通坐骑仍由 `IsMounted()` 判断。
 
@@ -122,6 +124,7 @@ self:updatePlayerPower(powerType)
 
 - 最大值大于等于 250：按 0-100 输出百分比，适合法力这类大资源。
 - 最大值小于 250：按 0-`powerMax` 输出实际点数，适合能量、怒气等较小资源。
+- EnumPowerType 映射表定义在 Fuyutsui/core/config.lua 第 766-787 行：MANA=0、RAGE=1、FOCUS=2、ENERGY=3、COMBO_POINTS=4、RUNES=5、RUNIC_POWER=6、SOUL_SHARDS=7、LUNAR_POWER=8、HOLY_POWER=9、MAELSTROM=11、CHI=12、INSANITY=13、BURNING_EMBERS=14、DEMONIC_FURY=15、ARCANE_CHARGES=16、FURY=17、PAIN=17（注：PAIN 与 FURY 共享 ID 17）、ESSENCE=19、SHADOW_ORBS=28。
 - `CreatPowerCurve(powerType)` 有永久缓存机制：首次为某资源类型创建曲线后缓存于 `powerCurve[powerType]`，后续调用直接返回缓存（main.lua 第 54 行 `if powerCurve[powerType] then return end`）。这意味着曲线在运行期间不会因资源最大值变化（如专精切换、等级提升）而更新。
 
 `updatePlayerPower(powerType)` 还有一个特殊资源分支：
@@ -272,7 +275,7 @@ Python 读到的是 `maxRange` 的整数近似值，不是精确坐标距离。
 
 `目标施法` 和 `目标引导` 只在部分职业/专精声明了对应 block 时输出。它们读取 `UnitCastingDuration("target")` / `UnitChannelDuration("target")`，使用和玩家施法相同的 `castCurve` 输出剩余时间，常规情况下也是约等于“秒 * 100”。
 
-这里有一个特殊编码：源码会读取 `UnitCastingInfo("target")` / `UnitChannelInfo("target")` 的 `notInterruptible`，如果目标读条不可打断，就用 `falseValueWhite = CreateColor(0, 0, 1, 1)` 覆盖原本的时间值。Python 读到的就是 255。也就是说，`目标施法 == 255` 或 `目标引导 == 255` 不一定代表剩余时间超过 2.55 秒，也可能代表不可打断。
+这里有一个特殊编码：源码会读取 `UnitCastingInfo("target")` / `UnitChannelInfo("target")` 的 `notInterruptible`，如果目标读条不可打断，就用 `falseValueWhite = CreateColor(0, 0, 1, 1)` 覆盖原本的时间值。Python 读到的就是 255。也就是说，`目标施法 == 255` 或 `目标引导 == 255` 不一定代表剩余时间超过 2.55 秒，也可能代表不可打断（注意：falseValueWhite 的变量名虽包含 'White'，但实际颜色是纯蓝 B=1，见 main.lua 第 21-22 行的定义 CreateColor(0, 0, 1, 1)。）
 
 ### 敌人人数
 
@@ -323,8 +326,13 @@ state_dict["group"]["1"]["驱散"]
 | `1` | TANK |
 | `2` | HEALER |
 | `3` | DAMAGER |
+| `5` | 未识别（roleMap 中无对应项时的回退值） |
 
 字段名叫 `职责`，但实际输出还包含有效性和距离判断：队友死亡、不可协助、不在视野、或 `UnitInRange()` 为假时会写 0；只有有效且在范围内时才写 `roleMap` 的职责值。因此 Python 里 `职责 == 0` 不一定表示真实职责是 NONE，也可能表示这个单位当前不可用。
+
+注意代码中存在回退机制：当 `UnitGroupRolesAssigned()` 返回的职责字符串不在 `roleMap` 中时，写入 5/255。因此 Python 端可能读到 `职责 == 5`，表示该成员的职责字符串未能被识别。
+
+注意：当前源码还有一个独立的 `updateUnitInSight` 机制。当 `UI_ERROR_MESSAGE` 返回消息"目标不在视野中"时（main.lua 第 1672 行），会将该成员的 `inSight` 立即置为 false，并在 1.5 秒后自动恢复为 true（main.lua 第 1157-1172 行）。`inSight` 作为 `valid` 的条件之一（第 1109 行和 1123 行），影响 `职责` 字段——当 `inSight` 为 false 时，该成员的 `valid` 为 false，`职责` 被写为 0。另外注意"目标不在视野中"是中文本地化字符串，英文客户端使用不同文本（如 "Target out of line of sight"），此机制在非中文客户端上永不会触发。
 
 `updateGroupInRangeAndHealth()` 每次调用只更新一个团队成员（main.lua 第 1116-1137 行），通过 `updateIndex` 轮转，而非全量刷新。因此 Python 端看到的 `group` 字典不是同一快照时刻的数据——不同成员的 `生命值`、`职责` 可能来自不同帧。此外，玩家自身在 `inRange` 判定中通过 `UnitIsUnit(unit, "player")` 直接返回 true（第 1125 行），不经过 `UnitInRange()` 检查，因此玩家自身始终被视为「在范围内」。
 
@@ -381,7 +389,9 @@ elseif message == "射程范围内无有效目标。" then
 end
 ```
 
-`updateDiseaseJudge()` 在存在 `blocks.state["疾病判断"]` 时写 1，1 秒后自动清 0。也就是说它表达的是“刚刚出现过这类 UI 错误提示”，不是稳定的目标疾病状态，也不是可驱散类型。
+`updateDiseaseJudge()` 在存在 `blocks.state[“疾病判断”]` 时写 1，1 秒后自动清 0。也就是说它表达的是”刚刚出现过这类 UI 错误提示”，不是稳定的目标疾病状态，也不是可驱散类型。
+
+注意 `UI_ERROR_MESSAGE` 的 message 文本是客户端本地化的。中文字符串”射程范围内无有效目标。”仅在 zhCN/zhTW 客户端有效；英文等其他语言客户端使用不同的错误文本（如英文的 “Out of range.”），此处的字符串比较不会匹配，`updateDiseaseJudge()` 永远不会触发。如果 mod 需要跨语言兼容，应考虑使用 `UNIT_SPELLCAST_FAILED` 事件或光环扫描替代此机制。
 
 ## 配置开关状态
 
@@ -446,7 +456,7 @@ C_UnitAuras.GetAuraDuration("player", state.DefensiveAuraInstanceID)
 - `type: "int"`：`int(raw)`
 - `spells:`：放到 `state_dict["spells"]`
 - `group:`：按队伍 block 段落展开到 `state_dict["group"]`
-- `step: bar`：从第二行 `countBars` 读取，不从顶部普通像素读取。countBars 是独立于顶部普通像素的渲染行（block.lua 第58-156行）：通过 `CreateAutoLayoutBar()` 创建 StatusBar 帧，支持 `castCount`（施法次数）和 `charge`（充能层数）两种 valueType；背景色块用 G 通道编码索引，末尾有灰色终点标记。多个职业配置（DeathKnight、DemonHunter、Priest、Monk、Warlock 的 ClassBlocks）使用 `countBars` 键定义条计数器。Python 端（GetPixels.py 第140-236行）通过扫描第一列红色标记定位 countBars 行，按红色分段、白色分隔、灰色终止的规则解析各条段的值。
+- `step: bar`：从第二行 `countBars` 读取，不从顶部普通像素读取。countBars 是独立于顶部普通像素的渲染行（block.lua 第58-156行）：通过 `CreateAutoLayoutBar()` 创建 StatusBar 帧，支持 `castCount`（施法次数）和 `charge`（充能层数）两种 valueType；背景色块用 G 通道编码索引，末尾有灰色终点标记。多个职业配置（DeathKnight、DemonHunter、Priest、Monk、Shaman、Warlock 的 ClassBlocks）使用 `countBars` 键定义条计数器。Python 端（GetPixels.py 第140-236行）通过扫描第一列红色标记定位 countBars 行，按红色分段、白色分隔、灰色终止的规则解析各条段的值。
 
 所以新增第三方字段时要同时对齐三处：
 
@@ -497,3 +507,9 @@ C_UnitAuras.GetAuraDuration("player", state.DefensiveAuraInstanceID)
 | 2026-05-30 | Iota | Python 端结构 | Theta 二审 | 扩展 `step: bar` 说明，补充 countBars 流水线细节 |
 | 2026-05-30 | Iota | 刷新频率表 | Theta 二审 | 添加"法术失败"至事件驱动行，补充英雄天赋备注 |
 | 2026-05-30 | Iota | 队伍状态 | Theta 二审 | 补充 NUM_GROUPS=30 的固定槽位说明 |
+| 2026-05-30 | Iota | 目标施法和目标引导 | Theta 终审 | 补充 falseValueWhite 实际颜色为蓝色的注释 |
+| 2026-05-30 | Iota | 能量值和职业资源 | Theta 终审 | 补充 EnumPowerType 映射表（config.lua 第 766-787 行） |
+| 2026-05-30 | Iota | 有效性如何计算 | Theta 终审 | 补充 drinkStatus 法术名称本地化依赖警告及跨语言说明 |
+| 2026-05-30 | Iota | Python 端的结构 | Theta 终审 | countBars 职业列表补充萨满 |
+| 2026-05-30 | Iota | 疾病判断 | Theta 终审 | 补充 UI_ERROR_MESSAGE 中文字符串语言依赖警告 |
+| 2026-05-30 | Iota | 队伍状态 | Theta 终审 | roleMap 补充回退值 5，新增 updateUnitInSight 机制说明 |
