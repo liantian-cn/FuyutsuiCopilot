@@ -384,6 +384,10 @@ end
 
 该重置由 updateUnitIncomingHealsCurve2()（main.lua:1201-1205）执行，它遍历 group 中所有成员将 inComingHeals 置为 0。注意：由于双表分裂问题（见"队友列表来自哪里"节），updateUnitIncomingHealsCurve2() 使用局部变量 group（旧表）迭代。当前所有成员都写入旧表，因此函数能正确工作；但 Fuyutsui.group（新表）始终为空，是潜在的代码脆弱点。
 
+另外，updateUnitIncomingHealsCurve() 会在以下情况下静默返回不设置 inComingHeals：（1）state.castTargetUnit 为 nil（未通过 UNIT_SPELLCAST_SENT 成功匹配到目标）；（2）目标单位不在队友列表中（仍未被 updateGroup 添加或已离队）。
+
+当前源码中 UNIT_SPELLCAST_EMPOWER_STOP 的条件判断为 `unitTarget ~= "player"`（main.lua:1485），与 CHANNEL_STOP 的 `== "player"` 相反。导致玩家支配角色自身完成储力时，state.empowering、state.castTargetUnit、state.castTargetName、state.castTargetIndex 均不会被清除，储能像素和施法目标追踪可能久置为过期值。第三方 mod 作者在修复此 bug 前，应注意储能相关的逻辑不能依赖 state.empowering 的正确清除。
+
 ## Python 如何使用队友信息
 
 Python 解码后的结构大致如下：
