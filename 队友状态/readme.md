@@ -99,6 +99,8 @@ local i = reversed and numGroupMembers or (unit == 'party' and 0 or 1)
 - 在小队中先返回 `player`，再返回 `party1` 到 `partyN`。
 - 单人时 `GetNumSubgroupMembers()` 为 0，也会返回 `player`，所以第 1 个 group 槽位通常是玩家自己。
 
+需注意 `GetNumSubgroupMembers()` 返回的是**不包括玩家自己**的成员数量。例如，在完整的5人小队中返回 4，单人模式下返回 0。这正是迭代器需要特殊处理 `i == 0` 返回 `'player'` 的原因——当 `GetNumSubgroupMembers() == 0`（单人）时，循环仍会生成一次 `'player'` 条目。而在团队模式下，`GetNumGroupMembers()` 的返回值同样已通过调整（core.lua:355）排除了玩家，所以 raid 遍历从 `i = 1` 开始，只覆盖其他团队成员。
+
 注意：团队模式下 IterateGroupMembers 从 i=1 开始返回 raid1 到 raidN，不会返回 player（core/core.lua:352-366）。因此第 1 个 group 槽位对应的是 raid1 而非玩家自身。上述"第 1 个槽位通常是玩家自己"仅在小队/单人模式下成立。团队治疗逻辑的 mod 作者不应假设 slot 1 为玩家自身。
 
 `updateGroup()` 为每个单位保存：
@@ -122,6 +124,8 @@ local i = reversed and numGroupMembers or (unit == 'party' and 0 or 1)
 | `healthPercent` | `updateUnitHealthInfo()` 动态赋值，`= GetRGB() 的 B 值` | 间接（就是写入像素的值） |
 | `inSightTimer` | 视野恢复定时器 | 否，仅 Lua 内部使用 |
 | `curveTimer` | 治疗吸收恢复定时器 | 否，仅 Lua 内部使用 |
+
+注意：`obj.role` 仅在 `updateGroup()` 执行时赋值（main.lua:1308-1311）。`updateGroup()` 的触发路径包括初始化、`PLAYER_TALENT_UPDATE`（切专精）、`GROUP_ROSTER_UPDATE`（队伍变化，带 1 秒防抖）和 `updatePlayerBlocks()`。`obj.role` **不随** 每帧的 `updateGroupInRangeAndHealth()` 刷新（main.lua:1126 读取 obj.role 但不重新调用 `UnitGroupRolesAssigned`）。因此，战斗中通过团队面板修改某个玩家的职责后，Python 端 `state_dict["group"][slot]["职责"]` 的值不会立即更新，需等待下一次 `updateGroup()` 触发才能反映变更。
 
 注意：这是一个比"残留风险"严重得多的运行时数据污染问题。main.lua:16-17 将 Fuyutsui.group 和 Fuyutsui.groupList 缓存到局部变量 group/groupList。updateGroup()（第 1303 行）执行 self.group = {} 创建新表赋值给 Fuyutsui.group，但局部变量 group 仍指向旧表。后续所有对 group 和 groupList 的写入（第 1307 行 table.insert(groupList, unit)、第 1312 行 group[unit] = {...}）操作的都是旧表。而所有队友更新函数（updateUnitHealthInfo、updateGroupInRangeAndHealth、OnUpdateUnitAura 等）都通过局部变量访问旧表。结果是：
 
@@ -154,6 +158,8 @@ self:CreatTexture(index, obj.healthPercent)
 
 - `inComingHeals`：玩家开始施放某些单体治疗时，临时提高目标血量读数，避免连续对同一个目标过量治疗。
 - `healAbsorb`：目标发生治疗吸收变化时，临时将血量曲线基准从 100 降低到 85（`healAbsorb = 15`），默认 1 秒后恢复。但 updateUnitHealAbsorbCurve 每次触发都会取消旧定时器并重新计时（main.lua:1178-1187）。如果 UNIT_HEAL_ABSORB_AMOUNT_CHANGED 在短时间内多次触发（例如多个治疗吸收效果同时刷新），血量曲线基准为 85 的持续时间会被延长，超出上述 1 秒窗口。
+
+当 healAbsorb = 15 使曲线基准 b = 85 时（b < 100），`creatColorCurveScaling(85)` 执行 else 分支（main.lua:38-42）：`z = (100-85)/100 = 0.15`，曲线起点为 `AddPoint(0, (0,0,0,1))`，X=0 处 B=0 且没有重叠点；第二个点在 X=z=0.15 处 `AddPoint(z, CreateColor(0, 0, 1/255, 1))`，B=1/255。因此 0% 至约 15% 血量区间内 Python 通过 B 通道读到的值是 0，而非正常曲线（b=100）下的 1。mod 作者若依赖 B 值实现死亡判断（如检查某阈值以下的单位）需注意此差异：死亡单位在正常曲线下 B=1，但在 healAbsorb 场景中 0%~15% 血量区间同样读到 B=0，不可单纯依靠 B=0 判定死亡。
 
 当前 `helpfulSpells` 只覆盖这些治疗法术：
 
@@ -350,6 +356,8 @@ Fuyutsui:CreatTexture(index, color.b)
 | `11` | 流血 | 当前配置为空，因此通常不会输出为可驱散 |
 | `0` | 没有可驱散 Debuff，或玩家当前没有对应驱散能力 |
 
+注：表格中的 88423（自然之愈）同时出现在 `Fuyutsui/class/Druid.lua:159` 的德鲁伊恢复 ClassBlocks 中（`[40] = { type = "spell", spellId = 88423, name = "自然之愈" }`）。该法术 ID 承担双重角色：(a) 作为 `dispelAbilities[1]` 中的驱散能力项，被 `updateSpellKnown()` 用来判定玩家是否拥有魔法驱散能力；(b) 作为德鲁伊恢复专精 `ClassBlocks` 中的一个普通法术条目，用于职业轮转逻辑。mod 作者看到同一 spellId 出现在两个上下文中时，应理解这源于同一个法术同时服务驱散能力检测和技能执行的自然结果。
+
 Python 端读到的整数值直接等于驱散类型编号（1=魔法、2=诅咒、3=疾病、4=中毒、11=流血）。这是通过 Lua 的 `dispelCurve:AddPoint(i, CreateColor(0, 1, i/255, 1))`（main.lua:191）编码的：B 通道写入 i/255，Python 读回整数 i。
 
 当玩家未学会对应驱散法术时，`dispelCurve` 在该点写入 0（main.lua:194），Python 读到 0。流血类型（dispelAbilities[11] = {} 为空，main.lua:121）也是如此，因此通常输出 0。
@@ -437,7 +445,7 @@ Python 解码后的结构大致如下：
 | `get_unit_with_role_and_without_aura_name()` | 找指定职责且缺少某光环的单位 |
 | `get_lowest_health_unit_without_aura()` | 找缺少某光环且血量最低的单位 |
 | `get_lowest_health_unit_with_aura()` | 找有某光环且血量最低的单位 |
-| `get_lowest_health_unit_with_any_aura()` | 找拥有任意指定光环且血量最低的单位 |
+| `get_lowest_health_unit_with_any_aura()` | 找拥有**任意一个**指定光环且血量最低的单位；支持可变参数 `*aura_names`，可传入多个光环名（如 `get_lowest_health_unit_with_any_aura(state_dict, '回春术', '愈合', '生命绽放')`），内部通过 `_has_any_aura()` 逐光环检查，任一匹配即视为有效。与 `get_lowest_health_unit_with_aura()`（仅接受单个光环名参数）不同。 |
 | `get_lowest_health_unit_with_aura_count()` | 找某光环数值等于指定值的最低血单位 |
 | `get_unit_with_aura()` | 找拥有指定光环且持续时间最高的单位 |
 | `count_units_without_aura_below_health()` | 统计缺少某光环且低血的单位 |
@@ -500,3 +508,9 @@ Python `config.yml` 中实际配置了这些 group 字段：
 | 2026-05-30 | 职责代码片段 | 使用了未定义的 trueValue 变量和 b 变量 | 补充 local trueValue = CreateColor(...) 和 local _, _, b = booleanValue:GetRGB() |
 | 2026-05-30 | 队友槽位排列（Python 公式） | 未提及 GetPixels.py 第352行注释与实际代码不符 | 添加注说明注释含 -1 但实际执行无 -1 |
 | 2026-05-30 | 血量（事件说明） | 未提及 UNIT_HEAL_ABSORB_AMOUNT_CHANGED 等事件也会更新玩家自身血量 | 补充这些事件同样调用 self:updatePlayerHealth() 的说明 |
+| 2026-05-30 | 总体链路（第4步后） | 遗漏 updateGroupInRangeAndHealth() 的每帧刷新机制和 updateIndex 停滞条件 | 添加4a步骤，说明 OnUpdate 每帧调用、updateIndex 控制单成员处理及停滞风险 |
+| 2026-05-30 | 血量（healAbsorb 说明后） | 未描述 healAbsorb 场景下 b<100 时曲线起点 B=0 的行为 | 补充当 b<100 时 0%~15% 血量区间 B=0，不可单纯依靠 B=0 判定死亡 |
+| 2026-05-30 | 队友列表来自哪里（字段表后） | 未说明 obj.role 的刷新生命周期 | 补充 role 仅在 updateGroup() 赋值，不随每帧刷新，团队面板改职责后不立即反映 |
+| 2026-05-30 | 队友列表来自哪里（代码说明后） | 未显式说明 GetNumSubgroupMembers() 返回不包括玩家的语义 | 补充完整5人小队返回4、单人返回0，解释迭代器特殊处理 i==0 的原因 |
+| 2026-05-30 | Python 如何使用队友信息（函数表） | 未说明 get_lowest_health_unit_with_any_aura() 支持可变参数 | 扩展描述说明 *aura_names 和内部 OR 匹配，与接受单个参数的函数区分 |
+| 2026-05-30 | 队友可驱散状态（驱散类型表） | 未提及 88423 在 Druid.lua 中作为独立 ClassBlocks 条目的双重角色 | 补充注说明 88423 同时作为驱散能力和职业法术条目 |
