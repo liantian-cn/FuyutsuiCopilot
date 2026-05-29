@@ -52,7 +52,7 @@ end
 
 ## 插件端如何读取冷却
 
-`spells` 表是 `main.lua` 中的模块级局部变量（`local spells = {}`，第18行），由 `updateCooldownSpellKnown()` 在天赋/专精切换后填充（第140-156行），由 `updateSpellCooldown()` 每 0.2 秒遍历消费（第799-829行）。该表在 `updateCooldownSpellKnown()` 执行时被清空重建（`spells = {}`，第141行）。
+`spells` 表是 `main.lua` 中的模块级局部变量（`local spells = {}`，第18行），由 `updateCooldownSpellKnown()` 在天赋/专精切换后填充（第140-157行），由 `updateSpellCooldown()` 每 0.2 秒遍历消费（第799-829行）。该表在 `updateCooldownSpellKnown()` 执行时被清空重建（`spells = {}`，第141行）。
 
 冷却相关的 Lua API 在 `Fuyutsui/main.lua` 顶部缓存：
 
@@ -513,7 +513,7 @@ end
 
 ### issecretvalue 守卫机制
 
-`issecretvalue()` 是暴雪 API，用于判断当前法术数据是否属于游戏内部的"秘密"数据（如未公开的法术或隐藏状态）。`core.lua:345-346` 在插件启用时调用 `SetTestSecret(1)`，将 `secret*RestrictionsForced` 系列 CVar 设为 `"1"`，同时设置 `scriptErrors` 和 `doNotFlashLowHealthWarning`（`core.lua:345-346`），使 `issecretvalue()` 能正确识别秘密数据。事件处理器（如 `SPELL_UPDATE_COOLDOWN`、`SPELL_UPDATE_ICON`）在触发时通过此过滤跳过处于秘密状态的技能数据，避免 Python 端读到不完整的冷却或图标信息。`COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED` 和 `SPELL_ACTIVATION_OVERLAY_*` 等事件处理器不使用此过滤。
+`issecretvalue()` 是暴雪 API，用于判断当前法术数据是否属于游戏内部的"秘密"数据（如未公开的法术或隐藏状态）。`core.lua:350` 在模块加载时执行 `SetTestSecret(1)`，将 `secret*RestrictionsForced` 系列 CVar 设为 `"1"`，同时设置 `scriptErrors` 和 `doNotFlashLowHealthWarning`（`core.lua:345-346`），使 `issecretvalue()` 能正确识别秘密数据。事件处理器（如 `SPELL_UPDATE_COOLDOWN`、`SPELL_UPDATE_ICON`）在触发时通过此过滤跳过处于秘密状态的技能数据，避免 Python 端读到不完整的冷却或图标信息。`COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED` 和 `SPELL_ACTIVATION_OVERLAY_*` 等事件处理器不使用此过滤。
 
 主冷却数值仍由 `OnUpdate` 每 0.2 秒调用 `updateSpellCooldown()` 兜底。
 
@@ -835,3 +835,5 @@ for name, lbl in cooldown_vars.items():
 | 2026-05-30 | countBars 偏移说明 | 多代理审核（Theta 综合审核） | i=-1（左填充）对应 bar 值 0 的结论错误，改为正确的设计目的说明：+1/-1 偏移确保 i=0 编码为 G=1（与黑色 G=0 可区分），i=-1 和 i=0 均解码为 bar 值 0 |
 | 2026-05-30 | creatColorCurveScaling 段 | 多代理审核（Theta 综合审核） | "均使用 curve100" 错误，改为区分：updatePlayerHealth 和 updateTargetHealth 使用固定 curve100，updateUnitHealthInfo 使用独立动态曲线 |
 | 2026-05-30 | countBars 编码代码引用 | 多代理审核（Theta 综合审核） | block.lua:111（变量定义行）修正为 block.lua:117（实际 SetColorTexture 调用行） |
+| 2026-05-30 | 插件端如何读取冷却（第55行） | Theta 最终审核 | updateCooldownSpellKnown() 行号范围从「第140-156行」修正为「第140-157行」（含第157行的 end 语句） |
+| 2026-05-30 | issecretvalue 守卫机制（第516行） | Theta 最终审核 | SetTestSecret(1) 调用位置从「core.lua:345-346 在插件启用时」修正为「core.lua:350 在模块加载时」
