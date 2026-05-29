@@ -14,7 +14,9 @@ Fuyutsui 里有两类容易混在一起的"光环"：
 1. `Fuyutsui/core/auras.lua` 按职业 ID 建立 `Fuyutsui.Auras`。
 2. 每个光环用中文键名保存状态，例如 `remaining`、`duration`、`expirationTime`、`count`。
 3. `addAuras`、`updateAuras`、`removeAuras` 把"某个事件 + 某个 spellId"映射到要更新的光环。
-3.5 事件处理函数在 main.lua 中先通过 issecretvalue 过滤受保护的 spellId：SPELL_UPDATE_COOLDOWN 和 SPELL_UPDATE_ICON 有守卫；GLOW/OVERLAY 类和 COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED 处理函数无守卫。被过滤的 spellId 不会触发任何光环更新。
+3.5 事件处理函数在 main.lua 中先通过 issecretvalue/isSec 过滤受保护的 spellId：SPELL_UPDATE_COOLDOWN、SPELL_UPDATE_ICON 和 UNIT_SPELLCAST_SUCCEEDED 有守卫；GLOW/OVERLAY 类和 COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED 处理函数无守卫。被过滤的 spellId 不会触发任何光环更新。
+
+注：Fuyutsui/core/config.lua 中定义了 Fuyutsui.noSecretAuras 表（第858-902行），包含治疗专精的 HOT/盾/Buff 法术 ID，但其命名暗示与 issecretvalue 过滤有关，实际上该表未被任何事件处理函数引用，是完全的死代码。issecretvalue 守卫仅调用 WoW 内置 API C_Spell.IsSecretSpell，与 noSecretAuras 表无关。Mod 作者不应依赖该表作为过滤依据。
 4. `Fuyutsui/class/*.lua` 在职业块里用 `type = "aura"` 指定显示位置、`auraName` 和 `showKey`。
 5. `main.lua` 的 `loadPlayerBlocks()` 把这些配置放入 `blocks.auras`。
 6. `OnUpdate()` 每帧调用 `updateAura()` 计算剩余时间；每 0.2 秒调用 `updateAuraBlocks()` 写入顶部像素。
@@ -617,10 +619,18 @@ self:CreatTexture(blocks.state["防御光环"], b)
 - `showKey` 必须是该光环真实存在的字段，例如 `remaining`、`count`、`isIcon`。
 - Lua 职业文件的像素索引必须和 Python `config.yml` 的 `step` 对齐。
 - 如果 Python 字段配置成 `step: bar`，它读的是 `countBars`，不是 `updateAuraBlocks()` 写出的普通光环像素。
-- `issecretvalue` 或 `isSec` 在 main.lua 的事件处理层级过滤受保护的 spellId：SPELL_UPDATE_COOLDOWN 和 SPELL_UPDATE_ICON 有守卫，被过滤的 spellId 不会触发任何光环更新；GLOW/OVERLAY 类和 COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED 的处理函数没有守卫，这些路径不会过滤 spellId。
+- `issecretvalue` 或 `isSec` 在 main.lua 的事件处理层级过滤受保护的 spellId：SPELL_UPDATE_COOLDOWN、SPELL_UPDATE_ICON 和 UNIT_SPELLCAST_SUCCEEDED 有守卫，被过滤的 spellId 不会触发任何光环更新；GLOW/OVERLAY 类和 COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED 的处理函数没有守卫，这些路径不会过滤 spellId。
 - 逻辑光环多数是事件推导状态，和游戏真实 Buff/Debuff 图标可能存在短暂差异；要靠事件映射补齐刷新、消耗和清除路径。
 - 顶部像素只有 0-255 的整数通道。持续时间适合传秒级判断，不适合传高精度计时。
 - 新增光环除了在 `auras.lua` 中定义光环状态和事件映射外，还需要在职业 Lua 文件的 `ClassBlocks` 中添加 `type = "aura"` 的像素输出配置，以及在 Python `config.yml` 中添加对应的 `step` 字段映射。三者缺一不可。
 - 如果光环使用 `isIcon` 字段，注意在 `showKey` 中使用 `"isIcon"` 而不是 `"remaining"`；`isIcon` 的值 0/1/2 也经过 `v / 255` 写入像素，Python 端读到的 B 通道整数值恰好是 0、1、2。
 - 不要在 `addAuras` 和 `updateAuras` 中对同一个 (spellId, event) 组合做重复映射；如果某个技能既"获得"又"更新"同一个光环，应该只放在一张映射表中，然后在对应的 `applyAuraMapForSpellEvent` 或 `updateAuraMapForSpellEvent` 中处理。
 - `updateAura()` 每帧执行，其中的计算开销会随光环数量线性增长。如果一个职业定义了非常多的逻辑光环（>50），理论上会影响帧率。目前各职业的光环数量都在合理范围内（≤20）。
+
+## 修订记录
+
+| 日期 | 位置 | 修改原因 | 修改摘要 |
+|------|------|---------|---------|
+| 2026-05-30 | 总链路第3.5步（第17行） | Theta 审核：遗漏 UNIT_SPELLCAST_SUCCEEDED 的 isSec 守卫 | 将守卫列表补全为 SPELL_UPDATE_COOLDOWN、SPELL_UPDATE_ICON 和 UNIT_SPELLCAST_SUCCEEDED |
+| 2026-05-30 | 第3.5步附近新增说明 | Theta 审核：遗漏 noSecretAuras 死代码说明 | 新增关于 Fuyutsui.noSecretAuras 表为死代码的注 |
+| 2026-05-30 | "写 mod 时要注意"（第620行） | Theta 审核：同一遗漏 | 将守卫列表补全为 SPELL_UPDATE_COOLDOWN、SPELL_UPDATE_ICON 和 UNIT_SPELLCAST_SUCCEEDED |

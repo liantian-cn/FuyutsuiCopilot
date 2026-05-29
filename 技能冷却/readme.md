@@ -93,7 +93,7 @@ end
 Python 逻辑里的常见约定是：
 
 - `0`：技能当前可用。
-- `1~253`：技能仍在冷却，数值大致表示剩余秒数。
+- `1~254`：技能仍在冷却，数值大致表示剩余秒数。raw_B=254 极少见地由恰好 254 秒冷却产生，但在语义上与下文 isEnabled=false 的 fallbackColor 重叠。
 - `254`：通常表示 `isEnabled = false`，也可能是约 254 秒冷却。
 - `255`：长冷却被钳制到上限，或 Lua 端写入 `CreatTexture(index, 1)` 的兜底状态。
 - `-1`：Python `spells.get("技能名", -1)` 的默认值，表示 `spells` 字典里没有这个字段。
@@ -161,6 +161,8 @@ raw_B ≈ min(剩余秒数, 255)
 | 1~254 秒 | ~time/255 | 1~254 | 正在冷却，值约等于剩余秒数 |
 | ≥255 秒 | 1.0 | 255 | 长冷却，已钳制到上限 |
 
+> 上表是颜色曲线在物理映射前的理论取值范围（仅考虑曲线本身，不考虑 `isEnabled`/`fallbackColor` 的影响）。表中 `raw_B=254` 在语义上可能与下文 `isEnabled=false` 的 `fallbackColor` 重叠，详见本节「冷却值的完整语义表」。
+
 另有 `castCurve = creatColorCurve(2.55, 255)` 用于施法/引导/蓄力时间编码（映射范围 0-2.55 秒），与冷却曲线不同，不在本文讨论范围内，但需注意不要把 `curve255` 的编码规则泛化到所有曲线。
 
 这个线性映射是职业逻辑中使用 `> N`、`>= 162` 等阈值判断的基础——它们直接按秒数含义比较 raw_B 值。
@@ -169,11 +171,11 @@ raw_B ≈ min(剩余秒数, 255)
 - 法术冷却带第二参数 `1`（`main.lua:806`）。
 - 防御光环不带第二参数（`GetDefensiveAuraDuration`，`main.lua:785`），编码含义与法术冷却相同（B ≈ 剩余秒数，上限 255）。
 - 充能恢复不带第二参数（`main.lua:820`）。
-- 队伍光环不带第二参数（`auras.lua`）。
+- 队伍光环不带第二参数（`main.lua:1259`，`Fuyutsui:OnUpdateUnitAura` 函数内）。
 
 第二参数 `1` 在暴雪 API 内部的精确含义需要游戏内或官方文档进一步验证，不能只凭本仓库源码确定。
 
-另有 `creatColorCurveScaling` 用于百分比类值的归一化映射（当前仅用于生命值曲线，如 `updatePlayerHealth`）。能量曲线由独立的 `CreatPowerCurve` 创建，使用的是 `creatColorCurve` 而非此函数。
+另有 `creatColorCurveScaling` 用于百分比类值的归一化映射（当前仅用于生命值曲线，如 `updatePlayerHealth` 静态调用和 `updateUnitHealthInfo` 动态调用，后者在 `main.lua:1098` 中以 `creatColorCurveScaling(100 + obj.inComingHeals - obj.healAbsorb)` 形式传入动态参数）。能量曲线由独立的 `CreatPowerCurve` 创建，使用的是 `creatColorCurve` 而非此函数。
 
 ### `isEnabled` 与 `fallbackColor` 的影响
 
@@ -210,7 +212,7 @@ if cdInfo.isOnGCD then b = 0 end
 |---|---|---|
 | `0` | 技能可用（冷却就绪，或正处于 GCD） | 曲线 t=0 端，或 `isOnGCD` 强制归零 |
 | `1~253` | 技能正在冷却，值约等于剩余秒数 | 曲线线性映射 |
-| `254` | 技能被禁用（isEnabled=false），或极罕见的恰好 254 秒冷却 | `fallbackColor` 的 B 分量 |
+| `254` | 技能被禁用（isEnabled=false）；极少见地由恰好 254 秒冷却产生 | (a) `fallbackColor` 的 B 分量（isEnabled=false）；(b) 曲线线性映射（恰好 254 秒冷却） |
 | `255` | 冷却剩余 ≥255 秒（长冷却钳制），或 Lua 端写入 `CreatTexture(index, 1)` 的兜底状态 | 曲线钳制上限，或直接写入 B=1.0 |
 | `-1` | 字段未出现在 `spells` 字典中 | `spells.get("名称", -1)` 默认值 |
 
@@ -272,6 +274,8 @@ else:
     spells_sub[spell_key] = int(raw) if raw is not None else 0
 result["spells"] = spells_sub
 ```
+
+> **注意：** `spells` 子字典的 `else` 分支（上述第 272 行）强制将值转为 `int`（默认 `0`），与非 `spells` 普通字段的 `else` 分支（返回 `raw` 原始值，不做类型转换）不同。因此 `spells` 字典中的值始终为 `int` 类型。
 
 这里有一个重要细节：如果某个字段已经写在 `config.yml` 的 `spells:` 里，但当前截图没有读到对应 raw 值，`build_state_dict()` 会填 `0`，而不是 `-1`。`-1` 只会出现在职业逻辑使用 `spells.get("字段名", -1)` 且该字段根本不在 `spells` 字典中时。
 
@@ -632,7 +636,7 @@ if 爆发 == 1 and 复仇之怒CD == 0:
 
 ## spellsList 的完整结构
 
-`Fuyutsui.spellsList`（定义在 `Fuyutsui/core/config.lua`，第 3-624 行）是一个覆盖所有职业的全局映射表，将法术 ID 映射到统一索引和失败跟踪标记：
+`Fuyutsui.spellsList`（定义在 `Fuyutsui/core/config.lua`，第 3-624 行）是一个覆盖所有职业的全局映射表，将法术 ID（以及少量非法术 ID 的特殊标记，如 `384255`=切换天赋、`200749`=切换专精，用于检测玩家切换天赋/专精等界面状态变化）映射到统一索引和失败跟踪标记：
 
 ```lua
 Fuyutsui.spellsList = {
@@ -796,3 +800,15 @@ for name, lbl in cooldown_vars.items():
 ```
 
 显示的技能列表来自 `config.yml` 中当前专精的 `spells:` 键名。这个 GUI 仅用于调试/观察，不影响战斗逻辑。职业逻辑函数不读取 GUI 状态，只读取 `state_dict`。
+
+## 修订记录
+
+| 日期 | 修改位置 | 修改原因 | 修改内容 |
+|---|---|---|---|
+| 2026-05-30 | 冷却值的 Python 常见约定（原第96行） | Theta 审核意见 | `1~253` 改为 `1~254`，注明 raw_B=254 的语义重叠 |
+| 2026-05-30 | 颜色曲线表后（原第162行附近） | Theta 审核意见 | 增加说明标注该表为"物理映射前"范围，提示 raw_B=254 与 fallbackColor 重叠 |
+| 2026-05-30 | curve255 调用模式（原第172行） | Theta 审核意见 | `auras.lua` 改为 `main.lua:1259` + `Fuyutsui:OnUpdateUnitAura` 函数名 |
+| 2026-05-30 | creatColorCurveScaling 说明（原第176行） | Theta 审核意见 | 补充 `updateUnitHealthInfo` 动态调用模式 |
+| 2026-05-30 | 冷却值的完整语义表（原第213行） | Theta 审核意见 | raw_B=254 的来源改为列出双重来源 (a) fallbackColor (b) 曲线 |
+| 2026-05-30 | spells 子字典生成代码后（原第274行后） | Theta 审核意见 | 增加注释说明 spells 的 else 分支强制 int 转换，与普通字段不同 |
+| 2026-05-30 | spellsList 结构说明（原第635行） | Theta 审核意见 | 补充说明表中包含 384255（切换天赋）、200749（切换专精）等非法术 ID 特殊标记 |

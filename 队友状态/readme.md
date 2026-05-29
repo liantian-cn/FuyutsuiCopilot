@@ -18,7 +18,7 @@
 
 1. `Fuyutsui/class/*.lua` 在当前职业/专精的 `ClassBlocks` 里声明 `type = "group"`。
 2. `Fuyutsui/main.lua` 的 `loadPlayerBlocks()` 把该配置整理成 `blocks.groups`。
-3. `updateGroup()` 调用 `IterateGroupMembers()` 尝试建立 `group` 和 `groupList`。
+3. `updateGroup()` 调用 `IterateGroupMembers()` 尝试建立 `group` 和 `groupList`。`updateGroup()` 有三条触发路径：（a）初始化时 `GetCharacterSpecInfo()` 直接调用 `self:updateGroup()`（main.lua:349）；（b）切专精/天赋时 `PLAYER_TALENT_UPDATE` 事件直接调用 `self:updateGroup()`（main.lua:1365-1368）；（c）队伍列表变化时 `GROUP_ROSTER_UPDATE` 事件触发更新。需注意 `GROUP_ROSTER_UPDATE` 路径存在 1 秒防抖（debounce）机制（main.lua:1642-1654）：每次事件触发时先取消上一计时器（`rosterTimer:Cancel()`），再新建 1 秒 `C_Timer.NewTimer` 延迟执行 `updateGroup()`。因此连续快速重新组队时，`updateGroup()` 仅执行一次，mod 作者不能假设「队伍成员变化后立即能读到新数据」。
 4. `updateGroupInRangeAndHealth()`、`UNIT_AURA()`、`OnUpdateUnitAura()` 等函数读取 WoW API，并调用 `CreatTexture(index, value)` 写入顶部像素。
 5. `Fuyutsui/Fuyutsui/GetPixels.py` 用 `mss` 截取顶部一行，按像素 G/B 通道解码。
 6. `Fuyutsui/Fuyutsui/config.yml` 的 `group:` 配置把连续像素槽映射成 `state_dict["group"]`。
@@ -93,6 +93,8 @@ local i = reversed and numGroupMembers or (unit == 'party' and 0 or 1)
 - 在小队中先返回 `player`，再返回 `party1` 到 `partyN`。
 - 单人时 `GetNumSubgroupMembers()` 为 0，也会返回 `player`，所以第 1 个 group 槽位通常是玩家自己。
 
+注意：团队模式下 IterateGroupMembers 从 i=1 开始返回 raid1 到 raidN，不会返回 player（core/core.lua:352-366）。因此第 1 个 group 槽位对应的是 raid1 而非玩家自身。上述"第 1 个槽位通常是玩家自己"仅在小队/单人模式下成立。团队治疗逻辑的 mod 作者不应假设 slot 1 为玩家自身。
+
 `updateGroup()` 为每个单位保存：
 
 | 字段 | 来源 | 是否直接传给 Python |
@@ -156,10 +158,10 @@ self:CreatTexture(index, obj.healthPercent)
 | `82326` | 40 | 圣光术 |
 | `19750` | 15 | 圣光闪现 |
 | `8936` | 15 | 愈合 |
-| `186263` | 50 | 暗影痊合 |
+| `186263` | 50 | 暗影愈合 |
 | `77472` | 15 | 治疗波 |
 
-注意当前 helpfulSpells 只覆盖了牧师（快速治疗、祈福、暗影痊合）、圣骑士（圣光术、圣光闪现）、德鲁伊（愈合）、萨满（治疗波）。织雾武僧的活血术/氤氲之雾和戒律牧师的苦修等主要单体治疗法术不在其中。
+注意当前 helpfulSpells 只覆盖了牧师（快速治疗、祈福、暗影愈合）、圣骑士（圣光术、圣光闪现）、德鲁伊（愈合）、萨满（治疗波）。织雾武僧的活血术/氤氲之雾和戒律牧师的苦修等主要单体治疗法术不在其中。
 
 `UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 会更新死亡/有效状态；实际血量像素还会在每帧的 `updateGroupInRangeAndHealth()` 中轮询刷新。
 
@@ -201,6 +203,8 @@ end
 ```
 
 `updateUnitInSight()` 会让该单位 `inSight = false`，1.5 秒后恢复 true。
+
+实战效果：inSight 仅通过 UI_ERROR_MESSAGE「目标不在视野中」这个施法失败消息间接设为 false，正常游戏中几乎永远不会触发此条件。因此 `obj.valid`（main.lua:1123）中的 `inSight` 检查近乎形同虚设，mod 作者不应依赖 `inSight` 作为有意义的有效性门控。
 
 以上"无效时直接写 0"仅适用于职责槽。健康像素由 updateUnitHealthInfo 写入（main.lua:1119），该函数在职责槽之前执行且无死亡/无效检查。对于死亡单位，UnitHealthPercent 返回 0%，经由曲线映射后产生约 1 的 B 值（见血量节关于曲线重叠的说明），因此死亡单位的生命值像素为 1 而非 0。
 
@@ -245,7 +249,7 @@ end
 然后 `OnUpdateUnitAura()` 每 0.2 秒按 `blocks.groups.auras` 输出配置过的光环槽：
 
 - 一个槽可以配置多个 spellId。
-- `getMaxAuraByTable()` 会选过期时间最晚的那个光环。另外，该函数在迭代光环时会调用 isSec() 删除秘密值光环的缓存项（main.lua:1224-1225），看到秘密值光环时直接从 obj.aura 中移除。
+- `getMaxAuraByTable()` 会选过期时间最晚的那个光环。另外，该函数在迭代光环时会调用 `isSec()` 删除秘密值光环的缓存项（main.lua:1224-1225），看到秘密值光环时直接从 obj.aura 中移除。`isSec` 是 `main.lua:2` 定义的局部别名 `local isSec = issecretvalue`，对应 WoW API `issecretvalue`。暴雪对特定光环隐藏 spellId、targetName、unitGUID 等数据，`isSec()` 用于过滤这些受保护的秘密/遮蔽值（第 369 行也使用相同机制）。
 - `expirationTime == 0` 视为永久光环。Lua 传入 value=1，经 SetColorTexture(0, index/255, value, 1) 归一化编码后，B 通道 8 位值为 1.0 * 255 = 255。因此 Python 读到的是 255，与持续 255 秒的光环无法区分。
 - 有持续时间时，用 `C_UnitAuras.GetAuraDuration(unit, auraInstanceID)` 转成剩余秒数，最多 255。
 - 没有匹配光环时写 0。
@@ -309,7 +313,7 @@ num: 4
 
 ## 队友可驱散状态
 
-队友驱散输出在 `UNIT_AURA()` 中刷新：
+队友驱散输出在 `UNIT_AURA()` 中刷新。需要注意的是，`getAuraDispelTypeColor()` 函数入口会检查 `if not blocks.groups or not obj then return end`（main.lua:1278-1280），`UNIT_AURA` 事件处理也会检查 `if not obj then return end`（main.lua:1761-1762），确认目标单位已在 group 表中才会处理。因此对宠物、非队伍友方等非 group 成员触发的 `UNIT_AURA` 不会写入驱散像素。
 
 ```lua
 local auraInstanceIDs = C_UnitAuras.GetUnitAuraInstanceIDs(
@@ -377,6 +381,8 @@ function Fuyutsui:UNIT_SPELLCAST_SENT(_, unitTarget, targetName, castGUID, spell
     end
 end
 ```
+
+此处 `if not isSec(targetName)` 使用与第 248 行相同的 `isSec()` 机制（`issecretvalue` 的别名），过滤暴雪保护的秘密/遮蔽值——被隐藏或遮蔽的目标名无法通过字符串匹配找到对应队友，因此跳过该次施法目标记录。
 
 若当前专精配置了 `施法目标`，Lua 会把 `state.castTargetIndex` 写到玩家状态区；Python 读到的是目标 group 槽位编号。这个字段不在 `state_dict["group"]` 内，但它和队友治疗链路有关。
 
@@ -468,3 +474,16 @@ Python `config.yml` 中实际配置了这些 group 字段：
 - 队友 GUID 只用于 `UNIT_DIED` 匹配死亡，不会传给 Python。
 - `canAttack` 被保存进 group 对象，但当前队友输出链路没有使用它。
 - `目标类型` 里的友方可驱散值和队友 `驱散` 字段不是同一个输出槽。前者属于玩家状态里的目标信息，后者属于 group 成员信息。此外，两者使用的颜色曲线也不同：目标驱散使用 target.enemyCurve 和 target.friendCurve（main.lua:76-77），队友驱散使用 dispelCurve（main.lua:75），三者是独立的 C_CurveUtil.CreateColorCurve() 实例。
+
+## 修订记录
+
+| 日期 | 修改位置 | 原因 | 摘要 |
+|---|---|---|---|
+| 2026-05-30 | 血量表格（spellId 186263） | spellId 186263 名称误写为「暗影痊合」 | 修正为「暗影愈合」 |
+| 2026-05-30 | 队友列表来自哪里（第94行） | 未说明团队模式下第1个槽位对应 raid1 而非玩家自身 | 补充团队模式与小队模式的明确说明 |
+| 2026-05-30 | 总体链路（第3步） | 遗漏 updateGroup() 的初始化及 PLAYER_TALENT_UPDATE 触发路径 | 补充列出全部三个触发路径：初始化、PLAYER_TALENT_UPDATE、GROUP_ROSTER_UPDATE |
+| 2026-05-30 | 总体链路（第3步） | 遗漏 GROUP_ROSTER_UPDATE 的1秒防抖机制 | 补充说明 rosterTimer 取消重建及连续快速重组的防抖效果 |
+| 2026-05-30 | 队友增益（isSec 首次出现处） | 未解释 isSec() 的含义和来源 | 补充说明 isSec 是 issecretvalue 的局部别名，用于过滤暴雪保护秘密值 |
+| 2026-05-30 | 施法目标和治疗预估（isSec 出现处） | 同队友增益节遗漏 | 补充与第248行一致的 isSec 说明 |
+| 2026-05-30 | 队友可驱散状态（UNIT_AURA 说明） | 未提及驱散函数仅对已在 group 表中的单位生效 | 补充 getAuraDispelTypeColor 和 UNIT_AURA 的 group[unit] 检查说明 |
+| 2026-05-30 | 视野机制（inSight 说明） | 未点明 inSight 几乎永远为 true 的实战效果 | 补充说明 inSight 检查近乎形同虚设，mod 作者不应依赖

@@ -83,7 +83,9 @@ state.valid = valid and 1 / 255 or 0
 | `isDead` | `PLAYER_DEAD`、`PLAYER_ALIVE`、`PLAYER_UNGHOST`，以及初始化时 `UnitIsDeadOrGhost("player")` | 死亡或灵魂状态时无效 |
 | `mounted` | `PLAYER_MOUNT_DISPLAY_CHANGED`、`UPDATE_SHAPESHIFT_FORM(S)`，以及初始化 | 使用 `IsMounted()`，并尝试把部分变形形态视为坐骑 |
 | `isChatOpen` | hook 默认聊天框 `EditBox` 焦点 | 打开聊天输入时无效，避免误发按键 |
-| `drinkStatus` | `UNIT_SPELLCAST_SUCCEEDED` 检查法术名“饮水”或“进食饮水” | 饮水后置 true，20 秒后清空；移动也会清空 |
+| `drinkStatus` | `UNIT_SPELLCAST_SUCCEEDED` 检查法术名”饮水”或”进食饮水” | 饮水后置 true，20 秒后清空；移动也会清空 |
+
+注意 `updateDrinkStatus()` 的 else 分支会在法术名不是”饮水”或”进食饮水”时立即将 `drinkStatus` 置 false 并取消已有计时器。由于 `UNIT_SPELLCAST_SUCCEEDED` 对每次玩家成功施法都调用 `updateDrinkStatus(spellID)`，任何非饮水法术（包括战斗中的输出技能）都会立即清空 `drinkStatus`，实际窗口期远短于 20 秒。
 
 注意当前源码里有一个细节：`updateShapeshiftForm()` 把 `state.shapeshiftFormID` 存成 `shapeshiftFormID / 255`，但 `updatePlayerMounted()` 又拿它和原始 ID `27`、`3`、`29` 比较。这意味着“通过变形形态判断坐骑”的分支很可能不起作用；普通坐骑仍由 `IsMounted()` 判断。
 
@@ -311,6 +313,8 @@ state_dict["group"]["1"]["职责"]
 state_dict["group"]["1"]["驱散"]
 ```
 
+注意 Python 端 `build_state_dict` 固定创建 30 个队伍成员槽位（`NUM_GROUPS = 30`），无论实际队伍/团队人数。超出实际人数的条目各字段为 0。遍历 `group` 时应根据`队伍人数`字段判断有效成员数。
+
 `职责` 的值来自 `roleMap`：
 
 | 值 | 职责 |
@@ -442,7 +446,7 @@ C_UnitAuras.GetAuraDuration("player", state.DefensiveAuraInstanceID)
 - `type: "int"`：`int(raw)`
 - `spells:`：放到 `state_dict["spells"]`
 - `group:`：按队伍 block 段落展开到 `state_dict["group"]`
-- `step: bar`：从第二行 `countBars` 读取，不从顶部普通像素读取
+- `step: bar`：从第二行 `countBars` 读取，不从顶部普通像素读取。countBars 是独立于顶部普通像素的渲染行（block.lua 第58-156行）：通过 `CreateAutoLayoutBar()` 创建 StatusBar 帧，支持 `castCount`（施法次数）和 `charge`（充能层数）两种 valueType；背景色块用 G 通道编码索引，末尾有灰色终点标记。多个职业配置（DeathKnight、DemonHunter、Priest、Monk、Warlock 的 ClassBlocks）使用 `countBars` 键定义条计数器。Python 端（GetPixels.py 第140-236行）通过扫描第一列红色标记定位 countBars 行，按红色分段、白色分隔、灰色终止的规则解析各条段的值。
 
 所以新增第三方字段时要同时对齐三处：
 
@@ -460,8 +464,10 @@ C_UnitAuras.GetAuraDuration("player", state.DefensiveAuraInstanceID)
 |---|---|
 | 施法、引导、蓄力、队伍血量、光环计算 | `OnUpdate()` 每帧 |
 | 一键辅助、符文、目标距离、敌人人数、物品冷却、防御光环、技能冷却 | `OnUpdate()` 每 0.2 秒 |
-| 血量、能量、移动、死亡、坐骑、队伍变化、目标变化、首领战 | 对应 WoW 事件触发 |
+| 血量、能量、移动、死亡、坐骑、队伍变化、目标变化、首领战、法术失败 | 对应 WoW 事件触发 |
 | Python `get_info()` | `logic_gui.py` 约每 0.2 秒 |
+
+> 备注：`法术失败` 由 `UNIT_SPELLCAST_FAILED` 事件驱动刷新。`英雄天赋` 在 `updatePlayerBlocks` 中经 `C_Timer.After(1)` 延迟初始化一次，不属于定期刷新机制。
 
 因此 Python 端看到的玩家状态通常会有 0-0.4 秒量级延迟。它不保存历史状态，也不做预测，每轮都是重新截图并重建 `state_dict`。
 
@@ -482,3 +488,12 @@ C_UnitAuras.GetAuraDuration("player", state.DefensiveAuraInstanceID)
 - `延迟` 只由 `/fu delay` 写入，不是 `updatePlayerConfig()` 的初始化输出项。
 - 职业 Lua 里有字段不代表 Python 一定能读到；必须同步 `config.yml`。
 - Python `config.yml` 里有字段也不代表 Lua 一定会写；必须检查是否存在对应 `blocks.state["字段名"]` 更新路径。
+
+## 修订记录
+
+| 日期 | 修订人 | 位置 | 原因 | 概要 |
+|---|---|---|---|---|
+| 2026-05-30 | Iota | 有效性表格后 | Theta 二审 | 补充 `drinkStatus` 的 else 分支清理行为说明 |
+| 2026-05-30 | Iota | Python 端结构 | Theta 二审 | 扩展 `step: bar` 说明，补充 countBars 流水线细节 |
+| 2026-05-30 | Iota | 刷新频率表 | Theta 二审 | 添加"法术失败"至事件驱动行，补充英雄天赋备注 |
+| 2026-05-30 | Iota | 队伍状态 | Theta 二审 | 补充 NUM_GROUPS=30 的固定槽位说明 |
