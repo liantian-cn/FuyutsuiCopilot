@@ -18,10 +18,10 @@
 
 1. `Fuyutsui/class/*.lua` 在当前职业/专精的 `ClassBlocks` 里声明 `type = "group"`。
 2. `Fuyutsui/main.lua` 的 `loadPlayerBlocks()` 把该配置整理成 `blocks.groups`。
-3. `updateGroup()` 调用 `IterateGroupMembers()` 尝试建立 `group` 和 `groupList`。`updateGroup()` 有四条触发路径：（a）初始化时 `GetCharacterSpecInfo()` 直接调用 `self:updateGroup()`（main.lua:349）；（b）切专精/天赋时 `PLAYER_TALENT_UPDATE` 事件直接调用 `self:updateGroup()`（main.lua:1365-1368）；（c）队伍列表变化时 `GROUP_ROSTER_UPDATE` 事件触发更新；（d）`updatePlayerBlocks()` 调用 `self:updateGroup()`（main.lua:244）。需注意 `GROUP_ROSTER_UPDATE` 路径存在 1 秒防抖（debounce）机制（main.lua:1642-1654）：每次事件触发时先取消上一计时器（`rosterTimer:Cancel()`），再新建 1 秒 `C_Timer.NewTimer` 延迟执行 `updateGroup()`。因此连续快速重新组队时，`updateGroup()` 仅执行一次，mod 作者不能假设「队伍成员变化后立即能读到新数据」。注意：初始化时 `GetCharacterSpecInfo()` 和 `updatePlayerBlocks()` 各调用一次 `updateGroup()`（分别通过 main.lua:349 和 main.lua:244），因此 `OnEnable` 中 `updateGroup` 会被执行两次。切专精时 `PLAYER_TALENT_UPDATE` 处理函数（main.lua:1365-1368）也通过 `updatePlayerSpecInfo` 间接调用和直接调用各一次，同样存在双重重入。mod 作者不应假设 `updateGroup()` 在任何生命周期内只会执行一次。
+3. `updateGroup()` 调用 `IterateGroupMembers()` 尝试建立 `group` 和 `groupList`。`updateGroup()` 有四条触发路径：（a）初始化时 `GetCharacterSpecInfo()` 直接调用 `self:updateGroup()`（main.lua:349）；（b）切专精/天赋时 `PLAYER_TALENT_UPDATE` 事件直接调用 `self:updateGroup()`（main.lua:1365-1368）。需注意 `PLAYER_TALENT_UPDATE` 路径中 updatePlayerSpecInfo()（main.lua:358-359）起始处调用 self:clearAllTextures()，将 1~BLOCK_FIX_CONFIG.blockCount 号所有像素槽清零（core/block.lua:48-52）。在 clearAllTextures() 之后、updateGroup() 完成之前，所有 group 像素槽均处于 0 状态，mod作者应知晓专精/天赋切换期间存在此数据窗口；（c）队伍列表变化时 `GROUP_ROSTER_UPDATE` 事件触发更新；（d）`updatePlayerBlocks()` 调用 `self:updateGroup()`（main.lua:244）。需注意 `GROUP_ROSTER_UPDATE` 路径存在 1 秒防抖（debounce）机制（main.lua:1642-1654）：每次事件触发时先取消上一计时器（`rosterTimer:Cancel()`），再新建 1 秒 `C_Timer.NewTimer` 延迟执行 `updateGroup()`。因此连续快速重新组队时，`updateGroup()` 仅执行一次，mod 作者不能假设「队伍成员变化后立即能读到新数据」。注意：`GROUP_ROSTER_UPDATE` 处理函数（main.lua:1643-1654）的第一行即执行 state.castTargetName, state.castTargetUnit = nil, nil（main.lua:1644），这意味着队伍列表一发生变化，施法目标追踪立即丢失，而非等到1秒防抖结束后 updateGroup() 运行时才清除。此时 inComingHeals 在下一帧 updateUnitIncomingHealsCurve2() 被调用前仍依赖已失效的 castTargetUnit，mod作者不应在队伍变动期间假设 castTargetUnit 仍然有效。注意：初始化时 `GetCharacterSpecInfo()` 和 `updatePlayerBlocks()` 各调用一次 `updateGroup()`（分别通过 main.lua:349 和 main.lua:244），因此 `OnEnable` 中 `updateGroup` 会被执行两次。切专精时 `PLAYER_TALENT_UPDATE` 处理函数（main.lua:1365-1368）也通过 `updatePlayerSpecInfo` 间接调用和直接调用各一次，同样存在双重重入。mod 作者不应假设 `updateGroup()` 在任何生命周期内只会执行一次。
 4. `updateGroupInRangeAndHealth()`、`UNIT_AURA()`、`OnUpdateUnitAura()` 等函数读取 WoW API，并调用 `CreatTexture(index, value)` 写入顶部像素。
 
-4a. `updateGroupInRangeAndHealth()` 由 `OnUpdate`（main.lua:1822）每帧调用一次，每次只处理一个成员。当前处理的成员由全局变量 `updateIndex`（main.lua:19）控制，每处理完一个成员递增一次，到达列表末尾后重置为 1。
+4a. `updateGroupInRangeAndHealth()` 由 `OnUpdate`（main.lua:1822）每帧调用一次，每次只处理一个成员。当前处理的成员由模块级局部变量 `updateIndex`（main.lua:19）控制，每处理完一个成员递增一次，到达列表末尾后重置为 1。
 
 注意：当 `updateIndex > #groupList` 时（即队伍列表缩小但 updateIndex 未重置），该函数在 main.lua:1117-1118 处因 `groupList[updateIndex]` 返回 nil 而提前 return，且不递增 updateIndex，导致刷新停滞。此风险在当前源码中因双表分裂问题（groupList 从不缩小）被掩盖，但修复后必须在 updateGroup() 末尾配套重置 updateIndex = 1。详见「队友列表来自哪里」节第 131 行的说明。（另见「需要注意的细节」节相关补充说明。）
 5. `Fuyutsui/Fuyutsui/GetPixels.py` 用 `mss` 截取顶部一行，按像素 G/B 通道解码。
@@ -263,7 +263,7 @@ end
 然后 `OnUpdateUnitAura()` 每 0.2 秒按 `blocks.groups.auras` 输出配置过的光环槽：
 
 - 一个槽可以配置多个 spellId。
-- `getMaxAuraByTable()` 会选过期时间最晚的那个光环。另外，该函数在迭代光环时会调用 `isSec()` 删除秘密值光环的缓存项（main.lua:1224-1225），看到秘密值光环时直接从 obj.aura 中移除。`isSec` 是 `main.lua:2` 定义的局部别名 `local isSec = issecretvalue`，对应 WoW API `issecretvalue`。暴雪对特定光环隐藏 spellId、targetName、unitGUID 等数据，`isSec()` 用于过滤这些受保护的秘密/遮蔽值（getMaxAuraByTable 第 1224 行在迭代光环时调用 isSec 移除秘密值缓存；UNIT_SPELLCAST_SENT 第 1411 行对 targetName 使用 isSec 过滤保护名）。
+- `getMaxAuraByTable()` 会选过期时间最晚的那个光环。另外，该函数在迭代光环时会调用 `isSec()` 删除秘密值光环的缓存项（main.lua:1224-1225），看到秘密值光环时直接从 obj.aura 中移除。`isSec` 是 `main.lua:2` 定义的局部别名 `local isSec = issecretvalue`，对应 WoW API `issecretvalue`。暴雪对特定光环隐藏 spellId、targetName、unitGUID 等数据，`isSec()` 用于过滤这些受保护的秘密/遮蔽值（getMaxAuraByTable 第 1224 行在迭代光环时调用 isSec 移除秘密值缓存；UNIT_SPELLCAST_SENT 第 1411 行对 targetName 使用 isSec 过滤保护名；UNIT_DIED 事件处理函数 main.lua:1656-1659 在调用 updateUnitDeath(unitGUID) 之前也执行 if not isSec(unitGUID) 过滤，死亡事件同样受到秘密值门控）。
 - `expirationTime == 0` 视为永久光环。Lua 传入 value=1，经 SetColorTexture(0, index/255, value, 1) 归一化编码后，B 通道 8 位值为 1.0 * 255 = 255。因此 Python 读到的是 255，与持续 255 秒的光环无法区分。
 - 有持续时间时，用 `C_UnitAuras.GetAuraDuration(unit, auraInstanceID)` 转成剩余秒数，最多 255。
 - 没有匹配光环时写 0。
@@ -477,7 +477,7 @@ Python `config.yml` 中实际配置了这些 group 字段：
 - `updateGroupInRangeAndHealth()` 每帧只刷新一个队友的血量和职责槽，团队人数多时完整轮询需要多帧。
 - `OnUpdateUnitAura()` 每 0.2 秒刷新一次队友光环槽。
 - `UNIT_AURA()` 只在队友 aura 事件到来时刷新驱散槽；如果状态异常，可能要等下一次 aura 事件或重新建组。
-- `updateGroup()` 目前不会主动调用 `clearGroupBlocks()`；同时局部 `group`/`groupList` 没有被清空。队伍人数减少或重新建组时，这是一个比"残留风险"严重得多的运行时数据污染问题。main.lua:16-17 将 Fuyutsui.group 和 Fuyutsui.groupList 缓存到局部变量 group/groupList。updateGroup()（第 1303 行）执行 self.group = {} 创建新表赋值给 Fuyutsui.group，但局部变量 group 仍指向旧表。后续所有对 group 和 groupList 的写入（第 1307 行 table.insert(groupList, unit)、第 1312 行 group[unit] = {...}）操作的都是旧表。而所有队友更新函数（updateUnitHealthInfo、updateGroupInRangeAndHealth、OnUpdateUnitAura 等）都通过局部变量访问旧表。结果是：
+- `updateGroup()` 目前不会主动调用 `clearGroupBlocks()`；同时局部 `group`/`groupList` 没有被清空。队伍人数减少或重新建组时，这是一个比"残留风险"严重得多的运行时数据污染问题。main.lua:16-17 将 Fuyutsui.group 和 Fuyutsui.groupList 缓存到局部变量 group/groupList。updateGroup()（第 1303 行）执行 self.group = {} 创建新表赋值给 Fuyutsui.group，但局部变量 group 仍指向旧表。后续所有对 group 和 groupList 的写入（第 1307 行 table.insert(groupList, unit)、第 1312 行 group[unit] = {...}）操作的都是旧表。而所有队友更新函数——包括 updateGroup() 末尾调用的 self:updateUnitValid(unit)、self:updateUnitHealthInfo(unit)、self:updateUnitFullAura(unit)（main.lua:1329-1331），以及 updateUnitHealthInfo、updateGroupInRangeAndHealth、OnUpdateUnitAura 等——都通过局部变量访问旧表。结果是：
 
 1. groupList（旧表）永远不会被清空，每次 updateGroup() 调用后持续积累重复条目。
 2. 离队成员的条目永远保留在旧 group 表中，不会被移除。
@@ -487,7 +487,7 @@ Python `config.yml` 中实际配置了这些 group 字段：
 第三方作者排查队友槽位异常时，必须意识到上述"双表分裂"问题，不能假设非当前队友槽位为 0；Python 固定解析 30 个槽位，逻辑侧依赖 `职责 == 0` 过滤无效单位时要特别小心。如果未来主动调用 clearGroupBlocks()，它从 blocks.groups.start 一直清零到 255（main.lua:1296），会覆盖同一像素区间内 spells、auras 等其他模块写入的像素。
 - 全量光环更新只扫描前 5 个 `PLAYER|HELPFUL|RAID_IN_COMBAT` Buff，且不会清空旧缓存；增量更新依赖 `UNIT_AURA` 的 added/updated/removed 列表。
 - 队友姓名只用于把 `UNIT_SPELLCAST_SENT` 的 `targetName` 映射回 group 槽位，不会传给 Python。
-- 队友 GUID 只用于 `UNIT_DIED` 匹配死亡，不会传给 Python。
+- 队友 GUID 只用于 `UNIT_DIED` 匹配死亡，GUID 通过 isSec() 过滤后（main.lua:1656-1659）才用于 UNIT_DIED 匹配死亡，不会传给 Python。
 - `canAttack` 被保存进 group 对象，但当前队友输出链路没有使用它。
 - `目标类型` 里的友方可驱散值和队友 `驱散` 字段不是同一个输出槽。前者属于玩家状态里的目标信息，后者属于 group 成员信息。此外，两者使用的颜色曲线也不同：目标驱散使用 target.enemyCurve 和 target.friendCurve（main.lua:76-77），队友驱散使用 dispelCurve（main.lua:75），三者是独立的 C_CurveUtil.CreateColorCurve() 实例。
 
@@ -514,3 +514,8 @@ Python `config.yml` 中实际配置了这些 group 字段：
 | 2026-05-30 | 队友列表来自哪里（代码说明后） | 未显式说明 GetNumSubgroupMembers() 返回不包括玩家的语义 | 补充完整5人小队返回4、单人返回0，解释迭代器特殊处理 i==0 的原因 |
 | 2026-05-30 | Python 如何使用队友信息（函数表） | 未说明 get_lowest_health_unit_with_any_aura() 支持可变参数 | 扩展描述说明 *aura_names 和内部 OR 匹配，与接受单个参数的函数区分 |
 | 2026-05-30 | 队友可驱散状态（驱散类型表） | 未提及 88423 在 Druid.lua 中作为独立 ClassBlocks 条目的双重角色 | 补充注说明 88423 同时作为驱散能力和职业法术条目 |
+| 2026-05-30 | 总体链路（第3步）—— GROUP_ROSTER_UPDATE 防抖说明 | 未提及处理函数第一行即清除 castTargetName/castTargetUnit | 补充说明 GROUP_ROSTER_UPDATE 处理函数立即清除施法目标追踪，而非等待防抖结束后才清除 |
+| 2026-05-30 | 总体链路（第3步）—— PLAYER_TALENT_UPDATE 触发路径 | 未提及 updatePlayerSpecInfo 起始处调用 clearAllTextures 清零所有像素槽 | 补充说明专精/天赋切换期间存在数据窗口，所有 group 像素槽短暂为 0 |
+| 2026-05-30 | 队友增益（isSec 说明）与 需要注意的细节（GUID） | isSec 说明未列举 UNIT_DIED 场景；GUID 未说明 isSec 过滤门控 | 在 isSec 说明中补充 UNIT_DIED 受秘密值门控；GUID 说明补充 isSec 过滤引用 |
+| 2026-05-30 | 需要注意的细节（双表分裂说明） | 未具体提及 updateGroup() 末尾的三行子调用也参与双表分裂 | 扩展枚举包括 updateUnitValid/updateUnitHealthInfo/updateUnitFullAura |
+| 2026-05-30 | 总体链路（第4a步） | "全局变量"措辞不精确 | 将"全局变量"改为"模块级局部变量" |
