@@ -86,14 +86,15 @@ end
 - `EvaluateRemainingDuration(curve255, 1)` 把剩余时间映射成颜色值。
 - 蓝色通道 `b` 是 Python 最终读到的冷却值。
 - 如果 `cdInfo.isOnGCD` 为真，代码强制 `b = 0`，让 Python 逻辑忽略公共冷却。
-- 如果没有冷却对象或冷却信息，写入 `1` 作为兜底。
+- 如果没有冷却对象或冷却信息，写入 B=1.0 作为兜底，Python raw 值为 255。
 
 Python 逻辑里的常见约定是：
 
 - `0`：技能当前可用。
-- `> 0`：技能仍在冷却，数值大致表示剩余时间。
-- `1`：常见兜底值，可能表示未学会、无冷却对象或不可用。
-- `-1`：Python `spells.get("技能名", -1)` 的默认值，表示配置里没有这个字段或没有读到。
+- `1~253`：技能仍在冷却，数值大致表示剩余秒数。
+- `254`：通常表示 `isEnabled = false`，也可能是约 254 秒冷却。
+- `255`：长冷却被钳制到上限，或 Lua 端写入 `CreatTexture(index, 1)` 的兜底状态。
+- `-1`：Python `spells.get("技能名", -1)` 的默认值，表示 `spells` 字典里没有这个字段。
 
 ## 冷却如何写入像素
 
@@ -160,7 +161,7 @@ raw_B ≈ min(剩余秒数, 255)
 
 这个线性映射是职业逻辑中使用 `> N`、`>= 162` 等阈值判断的基础——它们直接按秒数含义比较 raw_B 值。
 
-**注意：** `EvaluateRemainingDuration(curve255, 1)` 的第二参数 `1` 仅在法术冷却调用中出现（充能冷却 `GetSpellChargeDuration` 的调用不传此参数）。该参数与 `C_CurveUtil` 内部对 duration 对象的取整/取模行为有关，会略微影响小数值的精度，但不影响核心映射关系。
+**注意：** `EvaluateRemainingDuration(curve255, 1)` 的第二参数 `1` 仅在法术冷却调用中出现（充能冷却 `GetSpellChargeDuration` 的调用不传此参数）。当前源码只能确认两处调用参数不同；这个参数在暴雪 API 内部的精确含义需要游戏内或官方文档进一步验证，不能只凭本仓库源码确定。
 
 ### `isEnabled` 与 `fallbackColor` 的影响
 
@@ -198,10 +199,10 @@ if cdInfo.isOnGCD then b = 0 end
 | `0` | 技能可用（冷却就绪，或正处于 GCD） | 曲线 t=0 端，或 `isOnGCD` 强制归零 |
 | `1~253` | 技能正在冷却，值约等于剩余秒数 | 曲线线性映射 |
 | `254` | 技能被禁用（isEnabled=false），或极罕见的恰好 254 秒冷却 | `fallbackColor` 的 B 分量 |
-| `255` | 冷却剩余 ≥255 秒（长冷却钳制），或技能未学会（写入 1…见下文） | 曲线钳制上限 |
-| `-1` | 字段未在 `config.yml` 中配置或像素读取失败 | `spells.get("名称", -1)` 默认值 |
+| `255` | 冷却剩余 ≥255 秒（长冷却钳制），或 Lua 端写入 `CreatTexture(index, 1)` 的兜底状态 | 曲线钳制上限，或直接写入 B=1.0 |
+| `-1` | 字段未出现在 `spells` 字典中 | `spells.get("名称", -1)` 默认值 |
 
-注意：`updateCooldownSpellKnown()` 对未学会技能写入 `CreatTexture(index, 1)`，Python 读出 raw_B = 1。这与"冷却剩余 1 秒"的曲线查值（raw_B ≈ 1）在数值上重叠。但职业逻辑中 `== 0` 判断可用，所以 `1` 会被正确处理为"不可用"。
+注意：`CreatTexture(index, 1)` 写入的是蓝色通道 `1.0`，Python 从 BGRA 字节里读到的是 raw_B = 255，而不是 1。`updateCooldownSpellKnown()` 对未学会技能就是这样写入兜底值，所以未学会技能会和长冷却上限在数值上重叠。职业逻辑中通常用 `== 0` 判断可用，因此 `255` 会被正确处理为"不可用"。
 
 ## 技能是否参与扫描
 
@@ -224,7 +225,7 @@ end
 - 普通技能用 `C_SpellBook.IsSpellKnown(spellID)`。
 - 配了 `inSpellBook = true` 的技能用 `IsSpellInSpellBook(spellID)`。
 - 配了 `forcedKnown = true` 的技能强制加入扫描。
-- 未学会技能写 `1`，避免 Python 把它误判成 `0` 可用。
+- 未学会技能写入 B=1.0，Python 读到 raw_B = 255，避免被误判成 `0` 可用。
 
 `updateSpellKnown()` 会在启用插件、切换专精、天赋更新等结构性变化后调用。冷却数值本身不是靠这个函数刷新，而是靠 `OnUpdate` 周期刷新。
 
@@ -232,7 +233,7 @@ end
 
 `updateCooldownSpellKnown()` 并不立即重建 `spells` 表，而是用 `C_Timer.After(1, function() ... end)` 延迟 1 秒执行。这是因为切换专精或天赋后，游戏 API 可能需要一小段时间才能正确响应 `IsSpellKnown` / `IsSpellInSpellBook` 的查询。如果立即查询，可能得到错误结果，把已学会的技能当作未学会。
 
-延迟期间，`spells` 表已被清空（`spells = {}`），`updateSpellCooldown()` 遍历空表不产生任何输出。这意味着切换专精后约 1 秒内，所有技能冷却像素保持上一次的旧值或初始化值 `1`。Python 端在这段时间内读到的冷却值不可靠。
+延迟期间，`spells` 表已被清空（`spells = {}`），`updateSpellCooldown()` 遍历空表不产生任何输出。这意味着切换专精后约 1 秒内，技能冷却像素可能保持上一次的旧值，或在 `clearAllTextures()` 后保持 raw_B = 0。Python 端在这段时间内读到的冷却值不可靠。
 
 ## Python 如何生成 spells 字典
 
@@ -252,6 +253,8 @@ spells:
 spells_sub[spell_key] = int(raw) if raw is not None else 0
 result["spells"] = spells_sub
 ```
+
+这里有一个重要细节：如果某个字段已经写在 `config.yml` 的 `spells:` 里，但当前截图没有读到对应 raw 值，`build_state_dict()` 会填 `0`，而不是 `-1`。`-1` 只会出现在职业逻辑使用 `spells.get("字段名", -1)` 且该字段根本不在 `spells` 字典中时。
 
 职业逻辑最终这样读取：
 
@@ -347,7 +350,7 @@ Python 端 `scan_screen_data()` 会：
 
 ## 物品冷却
 
-药水和治疗石这类物品冷却不在 `spells` 子字典里。Lua 端使用 `C_Item.GetItemCooldown(itemID)`：
+药水和治疗石这类物品冷却由 Lua 端按普通 state block 写入像素，使用 `C_Item.GetItemCooldown(itemID)`：
 
 ```lua
 local startTimeSeconds, durationSeconds, enableCooldownTimer = C_Item.GetItemCooldown(itemID)
@@ -358,7 +361,7 @@ else
 end
 ```
 
-`updateItemCoolDown()` 会把这些冷却写到普通 state 字段：
+`updateItemCoolDown()` 会根据 `blocks.state` 查找并写入这些字段：
 
 - `大红冷却`
 - `大蓝冷却`
@@ -366,14 +369,15 @@ end
 - `鲁莽药水冷却`
 - `圣光潜力冷却`
 
-Python 逻辑读取方式也不同：
+Python 逻辑读取方式取决于 `config.yml` 把字段放在哪一层：
 
 ```python
 大红冷却 = state_dict.get("大红冷却", -1)
+大红冷却 = spells.get("大红冷却", -1)
 神圣震击CD = spells.get("神圣震击", -1)
 ```
 
-文档或 mod 示例里需要区分：技能冷却通常在 `state_dict["spells"]`，物品冷却通常在 `state_dict` 顶层。
+文档或 mod 示例里需要区分：技能冷却通常在 `state_dict["spells"]`，物品冷却在 Lua 端是普通 state block，但 Python 端可能被配置在 `state_dict` 顶层，也可能被配置在 `state_dict["spells"]` 里。写逻辑时要以当前专精的 `config.yml` 为准。
 
 ### 物品冷却与技能冷却的编码差异
 
@@ -396,8 +400,8 @@ self:CreatTexture(blocks.state["大红冷却"], math.min(1, remainingTime / 255)
 差异在于：
 - 技能冷却通过曲线插值，`b` 值是 `GetRGB()` 返回的浮点数（0-1），受曲线精度影响。
 - 物品冷却通过 `remainingTime / 255` 直接归一化，更精确但也是 0-1 范围。
-- 物品冷却的 `GetItemRemainingTime()` 在 `enableCooldownTimer` 为 false 时返回 255（表示"无冷却计时器"），写入像素的值就是 `math.min(1, 255/255) = 1`。
-- 物品冷却在物品数量为 0 时也写入 `1`，与冷却剩余 1 秒在数值上无法区分。但物品冷却的判定仍用 `== 0`。
+- 物品冷却的 `GetItemRemainingTime()` 在 `enableCooldownTimer` 为 false 时返回 255（表示"无冷却计时器"），写入像素的值就是 `math.min(1, 255/255) = 1.0`，Python raw 值为 255。
+- 物品数量为 0 时也写入 B=1.0，Python raw 值为 255，与长冷却上限在数值上无法区分。但物品冷却的判定仍用 `== 0`。
 
 物品冷却还涉及 `ITEM_COUNT_CHANGED` 事件，当药水数量变化时 Lua 会重新获取物品数量：
 
@@ -409,7 +413,7 @@ function Fuyutsui:ITEM_COUNT_CHANGED(_, itemID)
 end
 ```
 
-物品数量与冷却共同影响 `updateItemCoolDown()` 的输出——有冷却但数量为 0 时写入 `1`。
+物品数量与冷却共同影响 `updateItemCoolDown()` 的输出——数量为 0 时写入 B=1.0，Python raw 值为 255。
 
 ### 物品数量的双 ID 求和
 
@@ -420,7 +424,7 @@ self.state.HealthPotionCount = C_Item.GetItemCount(241304) + C_Item.GetItemCount
 self.state.HealthstoneCount = C_Item.GetItemCount(5512) + C_Item.GetItemCount(224464)
 ```
 
-冷却计时只查其中一个 ID（通常是第一个），但数量检查用的是两个 ID 之和。这意味着：如果玩家背包里只有高品质版本（第二个 ID），数量检查会通过（> 0），但冷却计时查询的是第一个 ID——如果第一个 ID 从未被使用过，`GetItemCooldown` 会返回 `startTimeSeconds = 0`，即"无冷却"，Python 端读到 `0`（可用）。
+冷却计时只查其中一个 ID（通常是第一个），但数量检查用的是两个 ID 之和。这意味着：源码层面只能确认“数量按两个 ID 求和、冷却只查询第一个 ID”。如果玩家背包里只有第二个 ID，高品质/普通版之间的冷却是否由游戏 API 共享，需要游戏内验证，不能仅凭本仓库源码断言一定读到 `0`。
 
 ### 物品冷却在 config.yml 中的位置不一致
 
@@ -494,7 +498,7 @@ end
 - 天赋切换导致技能 A 被技能 B 替换。
 - 被动效果改变技能 ID。
 
-Fuyutsui 的处理函数 `updateAuraBySpellOverride(baseSpellID, overrideSpellID)` 会在 `updateAuras` 映射中查找 `baseSpellID`，将匹配光环的 `expirationTime` 设置为 `GetTime() + aura.duration`（如果替代技能存在）或 nil（如果替代技能被移除）。
+Fuyutsui 的处理函数 `updateAuraBySpellOverride(baseSpellID, overrideSpellID)` 会分别在 `addAuras`、`updateAuras`、`removeAuras` 映射中查找 `baseSpellID`，将匹配光环的 `expirationTime` 设置为 `GetTime() + aura.duration`（如果替代技能匹配配置的 `overrideSpellID`）或 nil（如果不匹配或替代技能被移除）。
 
 这个机制确保：当一个技能被另一个技能替换时，Python 端能通过光环状态感知到变化，而不是继续按照旧技能的冷却状态做决策。
 
@@ -511,7 +515,7 @@ Fuyutsui 有两套独立的状态跟踪机制，容易混淆：
 
 **光环系统**（`updateAura` / `updateAuraBlocks`）：
 - 数据来源：职业配置中的光环声明 + 事件驱动的 `expirationTime` 设置
-- 刷新方式：每帧（高频）计算 `GetTime() - expirationTime` 的差值
+- 刷新方式：每帧（高频）计算 `expirationTime - GetTime()` 的剩余时间
 - 输出位置：顶部像素条的 `aura` 字段
 - Python 读取：`state_dict["光环名"]`
 - 用途：增益/减益持续时间、触发效果计时、叠加层数
@@ -598,7 +602,7 @@ Fuyutsui.spellsList = {
     [5782]    = { index = 1,  failed = true },   -- 恐惧
     [6789]    = { index = 2,  failed = true },   -- 死亡缠绕
     [30283]   = { index = 3,  failed = true },   -- 暗影之怒
-    [1247378] = { index = 4,  failed = false },  -- 无失败跟踪
+    [1247378] = { index = 19, },                -- 腐化
     ...
 }
 ```
@@ -614,7 +618,7 @@ Fuyutsui.spellsList = {
 
 ## loadPlayerBlocks 内部流程
 
-`loadPlayerBlocks(specIndex)` 在 `Fuyutsui/main.lua` 中定义，是连接职业配置和冷却扫描的关键函数。它在专精切换时被调用，负责重新初始化 `blocks` 表的三类数据：
+`loadPlayerBlocks(specIndex)` 在 `Fuyutsui/main.lua` 中定义，是连接职业配置和冷却扫描的关键函数。它在专精切换时被调用，负责重新初始化 `blocks` 表：
 
 ```lua
 blocks = {
@@ -635,17 +639,11 @@ blocks = {
 | `"group"` | 登记队伍显示的起始位置、成员数等 | `blocks.groups` |
 | `"countBars"` | 特殊的充能/计数 bar 配置（顶层键） | `blocks.countBars` |
 
-初始化完成后，`loadPlayerBlocks()` 会依次调用一系列更新函数：
-- `updatePlayerCasting(0)`
-- `updatePlayerSpecInfo()`
-- `updatePlayerValid()`
-- `updatePlayerCooldown()`（注意：不是 `updateSpellCooldown()`，而是将所有冷却像素重置为 `1` 的初始化函数）
-- `updatePlayerHealth()` / `updatePlayerPower()` / `updatePlayerBuff()`
-- `updatePlayerBarInfo()` → 创建 `countBars` 的 StatusBar
-- `updateRune()` / `updateTargetRangeBlock()` / `updateTargetHealth()` / `updateEnemyCount()`
-- `updateGroup()` / `GetItemCount()`
+注意：`loadPlayerBlocks()` 本身只构建并赋值 `self.blocks = blocks`，不负责写入所有像素，也没有 `updatePlayerCooldown()` 这个函数。后续像素刷新由调用方继续触发，例如：
 
-延迟 1 秒后通过 `C_Timer.After` 调用 `updatePlayerConfig()` 补充爆发开关等配置状态。
+- `GetCharacterSpecInfo()`：加载 blocks 后调用 `updateSpellKnown()`、`GetItemCount()`，并写入职业/专精。
+- `updatePlayerSpecInfo()`：先 `clearAllTextures()` 清空顶部像素，再 `loadPlayerBlocks()`、`updateSpellKnown()`、`updatePlayerBlocks()`。
+- `updatePlayerBlocks()`：刷新有效性、血量、能量、`countBars`、符文、目标、队伍、物品数量等，并延迟 1 秒调用 `updatePlayerConfig()` 补充爆发开关等配置状态。
 
 ## 符文冷却（updateRune）
 
@@ -667,7 +665,7 @@ function Fuyutsui:updateRune()
 end
 ```
 
-这个函数汇总 6 个符文槽的当前可用数量（每个槽 0 或 1），归一化为 0-1 浮点数后写入像素。Python 端读到的是约 `(可用符文数 / 255)` 的值。
+这个函数汇总 6 个符文槽的当前可用数量（每个槽 0 或 1），归一化为 0-1 浮点数后写入像素。由于 Python 读取的是 0-255 的 raw byte，最终读到的是可用符文数本身（0 到 6），不是 `(可用符文数 / 255)`。
 
 符文计数在 `OnUpdate` 的低频循环中每 0.2 秒刷新一次，与法术冷却刷新在同一周期。
 
@@ -719,12 +717,12 @@ function Fuyutsui:updateSpellFailed(spellID)
     end
 
     failedSpellTimer = C_Timer.NewTimer(1.5, function()
-        self:CreatTexture(blocks.state[“法术失败”], 0)
+        self:CreatTexture(blocks.state["法术失败"], 0)
         failedSpellTimer = nil
         failedSpell = nil
         failedSpellId = nil
     end)
-    self:CreatTexture(blocks.state[“法术失败”], state.failedSpell)
+    self:CreatTexture(blocks.state["法术失败"], state.failedSpell)
 end
 ```
 
