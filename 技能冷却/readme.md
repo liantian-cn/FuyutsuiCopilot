@@ -52,6 +52,8 @@ end
 
 ## 插件端如何读取冷却
 
+`spells` 表是 `main.lua` 中的模块级局部变量（`local spells = {}`，第18行），由 `updateCooldownSpellKnown()` 在天赋/专精切换后填充（第140-156行），由 `updateSpellCooldown()` 每 0.2 秒遍历消费（第799-829行）。该表在 `updateCooldownSpellKnown()` 执行时被清空重建（`spells = {}`，第141行）。
+
 冷却相关的 Lua API 在 `Fuyutsui/main.lua` 顶部缓存：
 
 ```lua
@@ -175,7 +177,7 @@ raw_B ≈ min(剩余秒数, 255)
 
 第二参数 `1` 在暴雪 API 内部的精确含义需要游戏内或官方文档进一步验证，不能只凭本仓库源码确定。
 
-另有 `creatColorCurveScaling` 用于百分比类值的归一化映射（当前仅用于生命值曲线，如 `updatePlayerHealth` 静态调用和 `updateUnitHealthInfo` 动态调用，后者在 `main.lua:1098` 中以 `creatColorCurveScaling(100 + obj.inComingHeals - obj.healAbsorb)` 形式传入动态参数）。能量曲线由独立的 `CreatPowerCurve` 创建，使用的是 `creatColorCurve` 而非此函数。
+另有 `creatColorCurveScaling` 用于百分比类值的归一化映射（当前仅用于生命值曲线，如 `updatePlayerHealth` 静态调用、`updateUnitHealthInfo` 动态调用和 `updateTargetHealth`（main.lua:1005）均使用 `curve100`）。能量曲线由独立的 `CreatPowerCurve` 创建，使用的是 `creatColorCurve` 而非此函数。
 
 ### `isEnabled` 与 `fallbackColor` 的影响
 
@@ -212,8 +214,8 @@ if cdInfo.isOnGCD then b = 0 end
 |---|---|---|
 | `0` | 技能可用（冷却就绪，或正处于 GCD） | 曲线 t=0 端，或 `isOnGCD` 强制归零 |
 | `1~253` | 技能正在冷却，值约等于剩余秒数 | 曲线线性映射 |
-| `254` | 技能被禁用（isEnabled=false）；极少见地由恰好 254 秒冷却产生 | (a) `fallbackColor` 的 B 分量（isEnabled=false）；(b) 曲线线性映射（恰好 254 秒冷却） |
-| `255` | 冷却剩余 ≥255 秒（长冷却钳制），或 Lua 端写入 `CreatTexture(index, 1)` 的兜底状态 | 曲线钳制上限，或直接写入 B=1.0 |
+| `254` | 技能被禁用（isEnabled=false）；极少见地由恰好 254 秒冷却产生 | (a) `fallbackColor` 的 B 分量（isEnabled=false）；(b) 曲线线性映射（恰好 254 秒冷却）；(c) 物品冷却剩余时间恰好 254 秒时，math.min(1, 254/255) 写入 B≈0.996（极少见） |
+| `255` | 冷却剩余 ≥255 秒（长冷却钳制），或 Lua 端写入 `CreatTexture(index, 1)` 的兜底状态 | (a) 曲线钳制上限；(b) 直接写入 B=1.0 的兜底状态；(c) 物品冷却 enableCooldownTimer=false 时 GetItemRemainingTime 返回 255，经 math.min(1, 255/255) 写入 B=1.0 |
 | `-1` | 字段未出现在 `spells` 字典中 | `spells.get("名称", -1)` 默认值 |
 
 注意：`CreatTexture(index, 1)` 写入的是蓝色通道 `1.0`，Python 从 BGRA 字节里读到的是 raw_B = 255，而不是 1。`updateCooldownSpellKnown()` 对未学会技能就是这样写入兜底值，所以未学会技能会和长冷却上限在数值上重叠。职业逻辑中通常用 `== 0` 判断可用，因此 `255` 会被正确处理为"不可用"。
@@ -241,7 +243,7 @@ end
 - 配了 `forcedKnown = true` 的技能强制加入扫描。
 - 未学会技能写入 B=1.0，Python 读到 raw_B = 255，避免被误判成 `0` 可用。
 
-注意：在 `blocks.spells[spellId]` 中，如果只有 `charge` 字段而无 `index` 字段（即职业配置只有带 `charge=true` 的条目、缺少对应的非充能条目），`info.index` 为 nil，`CreatTexture(nil, 1)` 会引发 Lua 运行时错误。当前所有职业配置均确保 `index` 存在，但自定义职业配置时需注意两者必须成对出现。
+注意：在 `blocks.spells[spellId]` 中，如果只有 `charge` 字段而无 `index` 字段（即职业配置只有带 `charge=true` 的条目、缺少对应的非充能条目），`info.index` 为 nil。`updateCooldownSpellKnown()` 和 `updateSpellCooldown()`（`main.lua:802`）都会因此错误地传递 nil 到 `CreatTexture`，引发 Lua 运行时错误。当前所有职业配置均确保 `index` 存在，但自定义职业配置时需注意两者必须成对出现。
 
 `updateSpellKnown()` 会在启用插件、切换专精、天赋更新等结构性变化后调用。冷却数值本身不是靠这个函数刷新，而是靠 `OnUpdate` 周期刷新。
 
@@ -254,6 +256,8 @@ end
 ## Python 如何生成 spells 字典
 
 Python 端先通过 `GetPixels.py` 得到 `row_data`，再根据 `config.yml` 的当前职业/专精配置生成状态字典。
+
+注意：`get_info()` 在无法找到游戏窗口或窗口处于最小化状态时返回 `None`（`GetPixels.py:387-389`）。`logic_gui.py` 的后台循环通过 `state_dict = state_dict or {}`（第419行）和 `if not sd or not sd.get("有效性")`（第430行）防御此情况，窗口恢复后下一轮扫描自动恢复正常。
 
 冷却字段在 `config.yml` 中放在 `spells:` 下：
 
@@ -341,13 +345,14 @@ Python 里通常读作：
 `CreateAutoLayoutBar()` 刷新时根据 `valueType` 分两个分支读取当前值：
 
 ```lua
-if valueType == "charge" then
+if valueType == "castCount" then
+    val = C_Spell.GetSpellCastCount(spellId) or 0
+elseif valueType == "charge" then
     local charges = C_Spell.GetSpellCharges(spellId)
     if not charges then return end
     val = charges.currentCharges or 0
-elseif valueType == "castCount" then
-    val = C_Spell.GetSpellCastCount(spellId) or 0
 end
+bar:SetMinMaxValues(minValue, maxValue)
 bar:SetValue(val)
 ```
 
@@ -365,6 +370,8 @@ Python 端通过 `step: bar` 读取：
 
 职业逻辑会组合使用这些值，例如“当前只有一层，下一层马上恢复”时优先消耗，避免浪费充能恢复。
 
+注意充能恢复冷却的行为差异：`updateSpellCooldown()` 中的充能分支（`main.lua:816-827`）不调用 `EvaluateColorFromBoolean`，因此不被 `cdInfo.isEnabled` 影响——即使技能被沉默/缴械，充能恢复冷却仍正常编码剩余秒数，不产生 raw_B=254 的禁用标记。充能分支也不受 `isOnGCD` 归零影响，公共冷却期间充能恢复值保持不变。
+
 ## countBars 如何被 Python 解码
 
 `countBars` 不在顶部 255 个像素里，而是在 `Fuyutsui/core/block.lua` 创建的第二条 bar。它用背景色块做分段标记，用白色 StatusBar 表示当前值，并用灰色终点标记结束。
@@ -377,6 +384,8 @@ Python 端 `scan_screen_data()` 会：
 4. 根据 `config.yml` 里的 `step: bar, bar: N` 映射到状态字段。
 
 因此 `countBars` 适合表示小整数计数，例如当前充能层数、施放次数、残片数量等；普通技能冷却仍走顶部像素条的 `spells`。
+
+注意偏移量：Lua 端背景色块绿色通道编码为 `(i+1)/255`（`block.lua:111`），Python 端 `_dict_value_from_raw_g` 通过减 1 还原（`GetPixels.py:189-190`）。此 +1/-1 偏移意味着 Python 读到 bar 值 0 对应 Lua 的 i=-1（左填充），而非第一个有效分段。
 
 ## 物品冷却
 
@@ -493,18 +502,18 @@ end
 | 事件 | 触发的处理 | issecretvalue 过滤 | 作用 |
 |---|---|---|---|
 | `SPELL_UPDATE_COOLDOWN` | `updateAuraBySpellCooldown(spellID)` | 是 | 冷却变化时同步光环过期时间 |
-| `SPELL_UPDATE_CHARGES` | `SPELL_UPDATE_CHARGES` 事件处理（目前为空） | 否（处理函数为空） | 充能变化时触发 bar 刷新 |
+| `SPELL_UPDATE_CHARGES` | `SPELL_UPDATE_CHARGES` 事件处理（目前为空） | 否（处理函数为空） | 事件处理函数为空，bar 刷新由 countBars StatusBar 自行注册该事件处理 |
 | `SPELL_UPDATE_USES` | `SPELL_UPDATE_USES` 事件处理（目前为空） | 否（处理函数为空） | `countBars` bar 已直接注册此事件刷新 |
 | `SPELL_UPDATE_ICON` | `updateAuraByIcon(spellID)` | 是 | 技能图标覆盖变化（如触发高亮） |
 | `COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED` | `updateAuraBySpellOverride(baseSpellID, overrideSpellID)` | 否 | 技能替换（天赋/被动替换技能 ID） |
 | `SPELL_ACTIVATION_OVERLAY_GLOW_SHOW/HIDE` | `updateAuraByOverlayGlow(spellID)` | 否 | 图标发光显示/隐藏时同步光环 |
 | `SPELL_ACTIVATION_OVERLAY_SHOW/HIDE` | `updateAuraByActivationOverlayShow/Hide(spellID)` | 否 | 屏幕提示显示/隐藏时同步光环 |
 
-注意：`SPELL_UPDATE_CHARGES` 和 `SPELL_UPDATE_USES` 的事件处理函数当前为空（no-op）。它们已被注册但处理函数内没有实际逻辑。`countBars` 的 StatusBar 组件自行注册了 `SPELL_UPDATE_USES`、`SPELL_UPDATE_CHARGES` 和 `PLAYER_ENTERING_WORLD` 三个事件并独立刷新，不依赖主框架的事件分发。
+注意：`SPELL_UPDATE_CHARGES` 和 `SPELL_UPDATE_USES` 的事件处理函数当前均为空（no-op）——与事件表各行中"作用"列描述一致。它们已被注册但主框架的处理函数内没有实际逻辑；`countBars` 的 StatusBar 组件自行注册了 `SPELL_UPDATE_USES`、`SPELL_UPDATE_CHARGES` 和 `PLAYER_ENTERING_WORLD` 三个事件并独立刷新，不依赖主框架的事件分发。
 
 ### issecretvalue 守卫机制
 
-`issecretvalue()` 是暴雪 API，用于判断当前法术数据是否属于游戏内部的"秘密"数据（如未公开的法术或隐藏状态）。`core.lua:350` 在插件启用时调用 `SetTestSecret(1)`，将 `secret*RestrictionsForced` 系列 CVar 设为 `"1"`，使 `issecretvalue()` 能正确识别秘密数据。事件处理器（如 `SPELL_UPDATE_COOLDOWN`、`SPELL_UPDATE_ICON`）在触发时通过此过滤跳过处于秘密状态的技能数据，避免 Python 端读到不完整的冷却或图标信息。`COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED` 和 `SPELL_ACTIVATION_OVERLAY_*` 等事件处理器不使用此过滤。
+`issecretvalue()` 是暴雪 API，用于判断当前法术数据是否属于游戏内部的"秘密"数据（如未公开的法术或隐藏状态）。`core.lua:345-346` 在插件启用时调用 `SetTestSecret(1)`，将 `secret*RestrictionsForced` 系列 CVar 设为 `"1"`，同时设置 `scriptErrors` 和 `doNotFlashLowHealthWarning`（`core.lua:345-346`），使 `issecretvalue()` 能正确识别秘密数据。事件处理器（如 `SPELL_UPDATE_COOLDOWN`、`SPELL_UPDATE_ICON`）在触发时通过此过滤跳过处于秘密状态的技能数据，避免 Python 端读到不完整的冷却或图标信息。`COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED` 和 `SPELL_ACTIVATION_OVERLAY_*` 等事件处理器不使用此过滤。
 
 主冷却数值仍由 `OnUpdate` 每 0.2 秒调用 `updateSpellCooldown()` 兜底。
 
@@ -812,3 +821,14 @@ for name, lbl in cooldown_vars.items():
 | 2026-05-30 | 冷却值的完整语义表（原第213行） | Theta 审核意见 | raw_B=254 的来源改为列出双重来源 (a) fallbackColor (b) 曲线 |
 | 2026-05-30 | spells 子字典生成代码后（原第274行后） | Theta 审核意见 | 增加注释说明 spells 的 else 分支强制 int 转换，与普通字段不同 |
 | 2026-05-30 | spellsList 结构说明（原第635行） | Theta 审核意见 | 补充说明表中包含 384255（切换天赋）、200749（切换专精）等非法术 ID 特殊标记 |
+| 2026-05-30 | 颜色曲线的数学原理（creatColorCurveScaling 段） | Theta 审核意见 | 补充 updateTargetHealth（main.lua:1005）作为 curve100 的调用方 |
+| 2026-05-30 | 冷却值的完整语义表 raw_B=255 | Theta 审核意见 | 来源列增加 (c) 物品冷却 enableCooldownTimer=false 路径，改为并列枚举格式 |
+| 2026-05-30 | 冷却值的完整语义表 raw_B=254 | Theta 审核意见 | 来源列增加 (c) 物品冷却剩余恰好 254 秒路径 |
+| 2026-05-30 | Python 如何生成 spells 字典（第256行后） | Theta 审核意见 | 增加 get_info() 在窗口未找到/最小化时返回 None 的说明及防御机制 |
+| 2026-05-30 | countBars 解码说明（第379行后） | Theta 审核意见 | 增加 Lua +1 / Python -1 偏移量说明 |
+| 2026-05-30 | 充能冷却和充能层数代码段 | Theta 审核意见 | 修正 if-elseif 顺序为 castCount 在前、charge 在后；补充 bar:SetMinMaxValues(minValue, maxValue) |
+| 2026-05-30 | 插件端如何读取冷却（第55行） | Theta 审核意见 | 补充 spells 表为模块级局部变量及生命周期说明 |
+| 2026-05-30 | 技能是否参与扫描（第244行） | Theta 审核意见 | 补充 updateSpellCooldown() 也受 index=nil 影响的警告 |
+| 2026-05-30 | 事件表 SPELL_UPDATE_CHARGES | Theta 审核意见 | 作用列改为"事件处理函数为空，bar 刷新由 countBars StatusBar 自行注册"，同步调整注释 |
+| 2026-05-30 | 充能冷却和充能层数（第371行后） | Theta 审核意见 | 补充充能分支不调用 EvaluateColorFromBoolean、不受 isOnGCD 归零影响的行为差异 |
+| 2026-05-30 | issecretvalue 守卫机制 | Theta 审核意见 | 补充说明 SetTestSecret(1) 同时设置 scriptErrors 和 doNotFlashLowHealthWarning |
