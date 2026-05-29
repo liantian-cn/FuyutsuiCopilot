@@ -60,6 +60,8 @@ Python 端读取到的是：
 | `英雄天赋` | 遍历 `Fuyutsui.heroTalents` 的已知法术 | 英雄天赋内部编号 |
 
 > 注意 `updateSpellFailed()` 写入法术失败像素前还需满足 `isUsable = true`（即 `C_Spell.IsSpellUsable()` 返回可用）。当技能处于冷却中（`IsSpellUsable()` 返回 false）时，即使收到 `UNIT_SPELLCAST_FAILED` 事件，法术失败像素也不会写入。
+> 
+> 法术失败机制还依赖三个模块级局部变量（main.lua:19，非 self.state 字段）—— failedSpell 记录失败法术在 spellsList 中的索引，failedSpellId 记录原始 spellID 供 updateFailedSpellBySuccess 匹配后清除，failedSpellTimer 为 1.5 秒后自动将法术失败像素清 0 的 C_Timer。这三个变量的存在意味着法术失败状态完全由内存中的变量管理，不依赖 WoW 事件中的持久化数据状态。
 
 ## 有效性如何计算
 
@@ -149,6 +151,8 @@ local specialPowerMap = {
 - 当 `UnitPower()` 不是受保护值，并且资源类型在 `specialPowerMap` 中时，写 `神圣能量`、`连击点`、`灵魂碎片`、`真气`、`精华能量` 等专用字段。
 - 当 `UnitPower()` 不是受保护值，并且资源类型不在 `specialPowerMap` 中时，当前源码没有在这个函数里写 `能量值`。
 
+注意：由于 SetTestSecret(1)（core.lua:350）使 isSec() 默认始终返回真，updatePlayerPower 中的 isSec(power) 检查恒为 true，因此分支 1（UnitPowerPercent -> 能量值）是实际运行的唯一路径。分支 2（specialPowerMap 中的 COMBO_POINTS/HOLY_POWER/ESSENCE/SOUL_SHARDS/CHI 映射到对应的专用资源字段）和分支 3（不写入）仅当执行 SetTestSecret(0) 后 isSec() 恢复正常的条件判断时才可能被触发。这意味着在默认运行时，Paladin 的「神圣能量」等专用资源字段不会通过此函数获得值。mod 作者如需读取原始资源点数，应考虑是否依赖此函数的特殊资源路径。
+
 因此写 Python 逻辑时不要假设同一轮截图里 `能量值` 和专用资源字段一定同时刷新。某些专精应优先读取自己的专用资源字段；只有需要通用主资源时再读 `能量值`。
 
 死亡骑士 `符文` 不走 `UnitPower`，而是每 0.2 秒汇总 6 个符文槽：
@@ -171,6 +175,8 @@ local staggerPercent = damage / maxHealth * 100
 
 `isSec` / `isSecretValue` 是魔兽世界 API，用于判断某值（spellID、targetName、GUID、power 等）是否属于受保护内容。在大秘境、评级 PvP 等受保护场景中，部分 API 返回值会被隐藏，通过 `isSec` 检查可以避免依赖不可靠的数据。
 
+当前源码在 core.lua:350 的 OnEnable 初始化中调用 SetTestSecret(1)，强制设置 secret*RestrictionsForced 系 CVar 为 1（共六个：secretChallengeModeRestrictionsForced、secretCombatRestrictionsForced、secretEncounterRestrictionsForced、secretMapRestrictionsForced、secretPvPMatchRestrictionsForced、secretAuraDataRestrictionsForced），使 isSec() 默认对所有值均返回真。这意味着下文描述的所有 isSec 拦截行为（包括 UNIT_SPELLCAST_SUCCEEDED/FAILED/SENT 的跳过及 UNIT_DIED 的保护）在非受保护内容中也始终生效。若手动执行 SetTestSecret(0)，isSec() 将恢复条件性行为——仅在真正受保护内容（大秘境、评级 PvP）中返回真；普通场景中 isSec 相关拦截将不再触发，此时 specialPowerMap 分支（如神圣能量、连击点）才能通过 updatePlayerPower 的第二分支实际写入。
+
 当前源码中 `isSec` 在以下位置影响事件处理：
 
 | 事件 | 函数 | isSec 检查目标 | 行为差异 |
@@ -178,6 +184,7 @@ local staggerPercent = damage / maxHealth * 100
 | `UNIT_SPELLCAST_SUCCEEDED` | `updateDrinkStatus()` | `isSec(spellID)` | 若 spellID 受保护，跳过 `updateDrinkStatus`、`updateFailedSpellBySuccess`、`updateAuraBySuccess`，整个回调直接 return |
 | `UNIT_SPELLCAST_FAILED` | `updateSpellFailed()` | `isSec(spellID)` | 若 spellID 受保护，跳过 `updateSpellFailed`，不记录法术失败 |
 | `UNIT_SPELLCAST_SENT` | 事件处理器 | `isSec(targetName)` | 若目标名受保护，阻止设置 `state.castTargetIndex`/`castTargetName`/`castTargetUnit` |
+| `UNIT_DIED` | 事件处理器 | `isSec(unitGUID)` | 若 unitGUID 受保护，跳过 `updateUnitDeath`，不检测该单位死亡 |
 
 在大秘境或评级 PvP 等受保护内容中运行 mod 时，这些拦截的具体影响包括：
 
@@ -360,7 +367,7 @@ state_dict["group"]["1"]["驱散"]
 | `3` | DAMAGER |
 | `5` | 未识别（roleMap 中无对应项时的回退值） |
 
-注意玩家自身在 `updateGroup()` 中的角色不经过 `UnitGroupRolesAssigned('player')`，而是被 `self.state.specRole` 覆盖（main.lua 第 1309-1311 行）。`specRole` 来自 `C_SpecializationInfo.GetSpecializationInfo()`（第 341 行），反映专精固有职责（DAMAGER/HEALER/TANK）而非队伍分配职责（LFD/LFR 指派）。其他队伍成员仍使用 `UnitGroupRolesAssigned()` 的返回值。
+注意玩家自身在 `updateGroup()` 中的角色不经过 `UnitGroupRolesAssigned('player')`，而是被 `self.state.specRole` 覆盖（main.lua 第 1309-1311 行）。`specRole` 来自 `C_SpecializationInfo.GetSpecializationInfo()`（第 340 行：GetCharacterSpecInfo；第 364 行：updatePlayerSpecInfo），反映专精固有职责（DAMAGER/HEALER/TANK）而非队伍分配职责（LFD/LFR 指派）。其他队伍成员仍使用 `UnitGroupRolesAssigned()` 的返回值。
 
 字段名叫 `职责`，但实际输出还包含有效性和距离判断：队友死亡、不可协助、不在视野、或 `UnitInRange()` 为假时会写 0；只有有效且在范围内时才写 `roleMap` 的职责值。因此 Python 里 `职责 == 0` 不一定表示真实职责是 NONE，也可能表示这个单位当前不可用。
 
@@ -477,7 +484,7 @@ end
 
 这类字段的详细冷却语义已经在 `技能冷却/readme.md` 中展开。
 
-另外注意 `updateItemCoolDown()` 中使用 `math.min(1, remainingTime / 255)` 写入冷却值，当冷却剩余时间超过 255 秒时 value 被钳制为 1，与 else 分支「物品不可用」时写入的值相同。Python 端读到 value=1 无法区分「刚进入冷却」和「还剩数百秒冷却」。mod 作者不应依赖 value=1 来唯一判断冷却状态。
+另外注意 `updateItemCoolDown()` 中使用 `math.min(1, remainingTime / 255)` 写入冷却值及 else 分支直接写 1，实际存在至少四条路径产生 value=1：(a) 冷却剩余时间恰好接近或超过 255 秒时钳制为 1，(b) 刚进入冷却且物品冷却时间本身接近 255 秒（remainingTime 约 255），(c) 物品完全未处于冷却（enableCooldownTimer=false，GetItemRemainingTime 返回 255，经 math.min(1, 255/255)=1 在 if 分支写入），(d) 物品数量为零或不可用（else 分支直接写 1）。Python 端读到 value=1 无法唯一区分无冷却、长冷却、物品不可用三种语义。
 
 ## 防御光环是特殊例外
 
@@ -599,3 +606,9 @@ C_UnitAuras.GetAuraDuration("player", state.DefensiveAuraInstanceID)
 | 2026-05-30 | Iota | 敌人人数 | Theta 终审 | 补充 state.mapID/encounterID 初始 nil 导致 startup 窗口期豁免条件不生效 |
 | 2026-05-30 | Iota | 职业专精额外 block 字段 | Theta 终审 | 补充高亮 aura 字段通过 step 映射出现在 state_dict 的跨引用提示 |
 | 2026-05-30 | Iota | Python 端的结构 | Theta 终审 | 补充 PLAYER_TALENT_UPDATE 不调用 ClearAllFuyutsuiBars 导致 countBars 残留风险 |
+| 2026-05-30 | Iota | 受保护值(isSec)对事件链的影响 | Theta 终审+一审 | 补充 SetTestSecret(1) 默认强制 isSec 始终为真的说明 |
+| 2026-05-30 | Iota | 受保护值(isSec)对事件链的影响 汇总表 | Theta 终审+一审 | 补充 UNIT_DIED 行至 isSec 汇总表 |
+| 2026-05-30 | Iota | 队伍状态 | Theta 终审+一审 | 修正 specRole 行号引用（341 -> 340:GetCharacterSpecInfo; 364:updatePlayerSpecInfo） |
+| 2026-05-30 | Iota | 物品状态为什么也算 block | Theta 终审+一审 | 扩充 value=1 歧义描述为四条路径（含无冷却路径） |
+| 2026-05-30 | Iota | 能量值和职业资源 | Theta 终审+一审 | 补充 SetTestSecret(1) 导致专用资源分支默认不可达的注释 |
+| 2026-05-30 | Iota | 法术失败 | Theta 终审+一审 | 补充 failedSpell/failedSpellId/failedSpellTimer 三个模块级局部变量说明 |
