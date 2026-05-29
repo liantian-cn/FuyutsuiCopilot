@@ -24,12 +24,12 @@ description: 多代理协作审核 Fuyutsui 说明文档。当用户需要审核
 ```javascript
 export const meta = {
   name: 'fuyutsui-doc-review',
-  description: '多Agent协作审核Fuyutsui文档：Alpha/Beta/Gamma并行审查 → Delta差异分析 → Epsilon/Zeta/Eta复查 → Theta综合审核 → Iota修改文档',
+  description: '多Agent协作审核Fuyutsui文档：Alpha/Beta/Gamma并行审查 → Delta差异分析（一审共通项）→ Epsilon/Zeta/Eta复查 → 二审共通项汇总 → Theta综合审核（含一审二审共通项）→ Iota修改文档',
   phases: [
     { title: '独立审查', detail: 'Alpha、Beta、Gamma 并行审查文档与源码' },
     { title: '差异分析', detail: 'Delta 比较三方审查结论，区分共同发现与差异' },
     { title: '差异复查', detail: 'Epsilon、Zeta、Eta 对差异点进行独立复查' },
-    { title: '综合审核', detail: 'Theta 综合所有结论并给出最终修改意见' },
+    { title: '综合审核', detail: 'Theta 综合一审共通项、二审共通项及全部复查结论，给出最终修改意见' },
     { title: '文档修改', detail: 'Iota 按审核意见修改文档' },
   ],
 };
@@ -279,6 +279,7 @@ log(`共识问题 ${common.length} 个，差异问题 ${differences.length} 个`
 phase('差异复查');
 
 let reviewResults = [];
+let reviewCommon = [];
 if (differences.length > 0) {
   const diffsJson = JSON.stringify(differences, null, 2);
 
@@ -312,6 +313,31 @@ ${diffsJson}
 
   reviewResults = reReviewers.filter(Boolean).map(r => r?.verdicts || []).flat();
   log(`复查完成，共 ${reviewResults.length} 条复查意见`);
+
+  // 汇总 Epsilon/Zeta/Eta 二审共通项：按 findingId 分组，统计每位复查者的确认情况
+  const reviewByFinding = {};
+  for (const v of reviewResults) {
+    if (!reviewByFinding[v.findingId]) reviewByFinding[v.findingId] = { confirmed: 0, total: 0, reasons: [] };
+    reviewByFinding[v.findingId].total++;
+    if (v.confirmed) {
+      reviewByFinding[v.findingId].confirmed++;
+      reviewByFinding[v.findingId].reasons.push(v.reasoning);
+    }
+  }
+  reviewCommon = [];
+  for (const [findingId, info] of Object.entries(reviewByFinding)) {
+    if (info.confirmed >= 2) {
+      const diff = differences.find(d => d.id === findingId);
+      reviewCommon.push({
+        findingId,
+        description: diff?.description || '(unknown)',
+        confirmed_count: info.confirmed,
+        total_reviewers: info.total,
+        reasoning_summary: info.reasons.join(' | '),
+      });
+    }
+  }
+  log(`二审共通项 ${reviewCommon.length} 个（Epsilon/Zeta/Eta 中 ≥2 位确认属实）`);
 } else {
   log('无差异点需要复查');
 }
@@ -328,10 +354,13 @@ const thetaPrompt = `你是一名资深的 Fuyutsui 架构师，代号 **Theta**
 
 ## 输入材料
 
-### 共识问题（高置信度，需修改）：
+### 一审共识问题（Alpha、Beta、Gamma 中 ≥2 位共同发现，高置信度）：
 ${JSON.stringify(common, null, 2)}
 
-### 差异复查结论：
+### 二审共通项（Epsilon、Zeta、Eta 中 ≥2 位确认属实的差异点）：
+${JSON.stringify(reviewCommon, null, 2)}
+
+### 差异复查原始结论（全部）：
 ${JSON.stringify(reviewResults, null, 2)}
 
 ### 原始差异点：
@@ -339,18 +368,18 @@ ${JSON.stringify(differences, null, 2)}
 
 ## 审核步骤
 
-### 第一步：验证共识问题
-快速阅读 \`${BASE}/Fuyutsui/\` 下相关源码，验证共识问题是否确实存在。
+### 第一步：验证一审共识问题
+快速阅读 \`${BASE}/Fuyutsui/\` 下相关源码，验证一审共识问题是否确实存在。
 如果某个"共识"在源码层面站不住脚，标注为误判并说明原因。
 
 ### 第二步：裁定差异问题
-根据 Epsilon、Zeta、Eta 三方的复查结论裁定每个差异点：
-- 若 ≥2 位复查者确认属实 → 加入修改列表
-- 若 ≥2 位复查者认为不属实 → 排除
-- 若三方意见不一致 → 你必须亲自阅读源码做出最终裁决
+二审共通项中 ≥2 位复查者已确认属实的差异点视为高置信度，优先纳入修改列表。
+你仍需对以下情况进行独立裁决：
+- 若某差异点不在二审共通项中（三方意见不一致或多数认为不属实），你必须亲自阅读源码做出最终裁决
+- 即使某差异点在二审共通项中，若你发现复查者的推理存在明显漏洞，也可以推翻并说明原因
 
 ### 第三步：补充审查
-基于你对 Fuyutsui 源码的全面理解，检查是否还有 Alpha/Beta/Gamma 都遗漏的重要问题。
+基于你对 Fuyutsui 源码的全面理解，检查是否还有 Alpha/Beta/Gamma 和 Epsilon/Zeta/Eta 都遗漏的重要问题。
 如果有，追加到修改列表中。
 
 ### 第四步：生成修改意见
@@ -361,7 +390,7 @@ ${JSON.stringify(differences, null, 2)}
 - \`priority\`: "必须修改" / "建议修改" / "可选"
 
 ## 重要提醒
-- 结合知识：你可能知道 Alpha/Beta/Gamma 不了解的源码细节
+- 结合知识：你可能知道所有审查者都不了解的源码细节
 - 不要修改 Fuyutsui/ 下的任何文件
 - 修改建议要具体、可操作`;
 
@@ -415,7 +444,7 @@ ${JSON.stringify(modifications, null, 2)}
 
 log('========== Fuyutsui 文档审核完成 ==========');
 log(`文档: ${docName}/readme.md`);
-log(`共识问题: ${common.length} | 差异问题: ${differences.length} | 修改意见: ${modifications.length}`);
+log(`一审共通: ${common.length} | 差异: ${differences.length} | 二审共通: ${reviewCommon.length} | 修改意见: ${modifications.length}`);
 ```
 
 ## 结果
