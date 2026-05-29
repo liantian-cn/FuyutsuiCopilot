@@ -7,3 +7,4 @@
 - [截图原理](截图原理/readme.md)：解释 Python 端使用 `mss` 截图、截图范围和像素格式。
 - [技能冷却](技能冷却/readme.md)：解释插件端如何读取技能冷却、充能、物品冷却，并通过像素传给 Python 逻辑。
 - [玩家光环](玩家光环/readme.md)：解释玩家 Buff、Debuff、Aura 的逻辑状态、持续时间、层数和像素读取方式。
+- [敌对光环](敌对光环/readme.md)：分析当前 Fuyutsui 是否能读取敌对目标身上的玩家 Debuff，以及 Aura、像素和 Python 配置链路的缺口。
