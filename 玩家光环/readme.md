@@ -52,7 +52,7 @@ Fuyutsui 里有两类容易混在一起的"光环"：
 
 ## 事件驱动：索引表的加载时构建
 
-`auras.lua` 定义了三张全局索引表 `addAuras`、`updateAuras`、`removeAuras`。文件底部的 `do...end` 块在插件加载时运行一次，遍历当前职业所有光环，把每个光环的 spellId 映射按 `event -> spellId -> auraName` 两级索引重新组织：
+`auras.lua` 定义了三张文件级局部索引表 `addAuras`、`updateAuras`、`removeAuras`。文件底部的 `do...end` 块在插件加载时运行一次，遍历当前职业所有光环，把每个光环的 spellId 映射按 `event -> spellId -> auraName` 两级索引重新组织：
 
 ```lua
 do
@@ -207,7 +207,7 @@ aura.expirationTime = GetTime() + duration
 },
 ```
 
-- 施放 `443421`（抚慰之雾的某个关联冷却）时，持续 4 秒（使用默认 `duration`）。
+- 施放 `443421`（抚慰之雾的某个关联冷却）时，持续 4 秒（使用事件条目中的 `duration`，其值与光环默认值相同均为 4）。
 - 施放 `116680`（氤氲之雾）成功时，覆盖为 8 秒（事件条目的 `duration` 优先）。
 - 同一个光环，不同技能触发可以有不同的持续时间。
 
@@ -515,8 +515,8 @@ bar 写法：
 
 | 颜色 (RGB) | 作用 |
 |---|---|
-| `(1, 0, 0)` — 红色 | 每条 bar 背景区域左侧额外色块，通常作为段起始标记 |
-| `(1, 1, 0)` — 红黄色 | 紧跟红色后的背景色块，可与红色配对识别新段 |
+| `(1, 0, 0)` — 暗红色（近黑色） | 每条 bar 背景区域左侧额外色块，作为段起始标记（R 通道仅 1，视觉上接近黑色） |
+| `(1, 1, 0)` — 暗红黄色（近黑色） | 紧跟起始标记后的背景色块，与前一个 R=1/G=0 像素配对识别新段（R 和 G 通道仅 1，视觉上接近黑色） |
 | `(255, 255, 255)` — 白色 | `StatusBar` 已填充区域，不是固定分隔符；它的宽度代表当前值 |
 | `(200, 200, 200)` — 灰色 | 共享行终止标记；源码复用同一个纹理并移动到最后一条 bar 末尾 |
 
@@ -585,7 +585,7 @@ local curve255 = Fuyutsui:creatColorCurve(255, 255)
 -- curve:AddPoint(255, CreateColor(0, 0, 255/255, 1))
 -- 即：0 秒 → B=0，255 秒 → B=1（量化后为 255）
 
-local duration = C_UnitAuras.GetAuraDuration("player", DefensiveAuraInstanceID)
+local duration = C_UnitAuras.GetAuraDuration("player", state.DefensiveAuraInstanceID)
 local auraduration = duration:EvaluateRemainingDuration(curve255)
 local _, _, b = auraduration:GetRGB()
 self:CreatTexture(blocks.state["防御光环"], b)
