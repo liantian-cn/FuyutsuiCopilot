@@ -16,7 +16,7 @@ Fuyutsui 里有两类容易混在一起的"光环"：
 3. `addAuras`、`updateAuras`、`removeAuras` 把"某个事件 + 某个 spellId"映射到要更新的光环。
 3.5 事件处理函数在 main.lua 中先通过 issecretvalue/isSec 过滤受保护的 spellId：SPELL_UPDATE_COOLDOWN、SPELL_UPDATE_ICON 和 UNIT_SPELLCAST_SUCCEEDED 有守卫；GLOW/OVERLAY 类和 COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED 处理函数无守卫。被过滤的 spellId 不会触发任何光环更新。
 
-注：Fuyutsui/core/config.lua 中定义了 Fuyutsui.noSecretAuras 表（第858-902行），包含治疗专精的 HOT/盾/Buff 法术 ID，但其命名暗示与 issecretvalue 过滤有关，实际上该表未被任何事件处理函数引用，是完全的死代码。issecretvalue 守卫仅调用 WoW 内置 API C_Spell.IsSecretSpell，与 noSecretAuras 表无关。Mod 作者不应依赖该表作为过滤依据。
+注：Fuyutsui/core/config.lua 中定义了 Fuyutsui.noSecretAuras 表（第858-902行），包含治疗专精的 HOT/盾/Buff 法术 ID，但其命名暗示与 issecretvalue 过滤有关，实际上该表未被任何事件处理函数引用，是完全的死代码。issecretvalue 是 WoW 内置的全局函数，用于过滤受保护的法术 ID，其具体实现不可从源码验证，与 noSecretAuras 表无关。Mod 作者不应依赖该表作为过滤依据。
 4. `Fuyutsui/class/*.lua` 在职业块里用 `type = "aura"` 指定显示位置、`auraName` 和 `showKey`。
 5. `main.lua` 的 `loadPlayerBlocks()` 把这些配置放入 `blocks.auras`。
 6. `OnUpdate()` 每帧调用 `updateAura()` 计算剩余时间；每 0.2 秒调用 `updateAuraBlocks()` 写入顶部像素。
@@ -143,9 +143,11 @@ end
 
 核心机制通过 `updateAuraByIconMap()` 实现：调用 `C_Spell.GetOverrideSpell(spellID)` 检查当前覆盖法术 ID，如果与配置的 `overrideSpellID` 匹配则设置 `expirationTime`（若有 `duration`）并设 `isIcon = 2`；否则清除 `expirationTime` 并设 `isIcon = 1`。
 
+注意：对于 `e["图标改变"]` 事件，`updateAuraByIcon()` 对 `addAuras`、`updateAuras`、`removeAuras` 三张表使用完全相同的 `updateAuraByIconMap()` 逻辑。`removeAuras` 中的条目不会执行「移除」操作，而是和 `addAuras` 一样重新检查图标覆盖状态。这与冷却/施法成功事件中 `removeAuras` 通过 `clearAurasFromRemoveMap` 执行清除的行为不同。
+
 使用 `isIcon` 的光环在职业块 `showKey` 中可以写 `"isIcon"` 来把状态值输出给 Python。和 `remaining`、`count` 一样，`isIcon` 的值也经过 `v / 255` 写入像素的 B 通道。Python 端读到的 B 通道整数值分别是 0、1、2（因为 `0/255 ≈ 0`、`1/255 ≈ 0.0039`、`2/255 ≈ 0.0078`，量化后恰好对应 0、1、2）。这是因为 SetColorTexture 的浮点参数经渲染管线到 8-bit 通道时执行 round(v/255 * 255) = round(v) 舍入。v 为小整数 (0-2) 时 round 后保持不变，因此 round-trip 是精确的。Python 端可以据此区分"尚未初始化"（0）、"当前未激活或不匹配"（1）以及"激活中"（2）。
 
-首次启用插件时，`OnEnable()` 会调用 `GetCharacterSpecInfo()`，其中会调用 `updateAuraIconByEnteringWorld()` 遍历所有 `e["图标改变"]` 下的 spellId 并调用 `updateAuraByIconMap()` 初始化图标覆盖状态。注意当前 `PLAYER_ENTERING_WORLD` 事件处理函数本身只更新地图和英雄天赋，不调用这个初始化函数。
+首次启用插件时，`OnEnable()` 会调用 `GetCharacterSpecInfo()`，其中会调用 `updateAuraIconByEnteringWorld()` 遍历所有 `e["图标改变"]` 下的 spellId 并调用 `updateAuraByIconMap()` 初始化图标覆盖状态。注意当前 `PLAYER_ENTERING_WORLD` 事件处理函数本身只更新地图和英雄天赋，不调用这个初始化函数。类似地，`PLAYER_TALENT_UPDATE` 触发 `updatePlayerSpecInfo()` 也不调用 `updateAuraIconByEnteringWorld()`，因此切换专精后 `isIcon` 光环的图标覆盖状态不会立即初始化，仅首次插件加载时通过 `GetCharacterSpecInfo()` 完成。
 
 `auras.lua` 中已知定义了 `isIcon` 的光环：圣骑士`神圣军备`、术士`魔典：邪能破坏者`（初始值为 `1`）。其中圣骑士职业块通过 `showKey = "isIcon"` 把`神圣军备`输出给 Python；术士当前职业块和 `config.yml` 里配置的是同名技能冷却像素，不是 `type = "aura"` 的 `isIcon` 输出。
 
@@ -255,6 +257,8 @@ end
 这是一种防御性设计：游戏有时会快速连续触发 SHOW/HIDE 事件（例如切换目标、UI 刷新），单纯跟随事件会导致光环状态抖动。通过额外调用 `IsSpellOverlayed()` 确认当前真实发光状态，保证光环状态与 UI 一致。
 
 这类光环的 `duration` 通常设得较长（例如 15 秒），因为不需要严格计时——只要发光还在就持续激活。`removeAuras` 用 `e["图标发光隐藏"]` 事件，但实际是否清除取决于 `IsSpellOverlayed()` 的返回值。
+
+注意：`updateAuraByOverlayGlow()` 只通过 `aura.duration` 刷新 `expirationTime`，不调用 `clearAurasFromRemoveMap()`。这意味着发光高亮光环的层数 (`count`) 不受发光事件直接影响，只能等下一帧 `updateAura()` 的过期检查（第1315-1335行）才可能间接归零。这与冷却/施法成功路径（调用 `clearAurasFromRemoveMap` 且 `resetCount=true`）行为不同。
 
 使用此机制的光环：战士`斩杀高亮`、`英勇打击高亮`、`顺劈斩高亮`、`致死高亮`；德鲁伊`塞纳留斯的梦境`；恶魔猎手`无羁邪怒`。
 
@@ -559,10 +563,11 @@ def _dict_value_from_raw_g(raw_g):
 ```lua
 local startIndex = nextAvailableIndex
 local barWidth = maxValue * BAR_CONFIG.width
+bar:SetSize(barWidth + 1, BAR_CONFIG.height)  -- +1 确保满格时能完全覆盖
 nextAvailableIndex = startIndex + maxValue + 3  -- +maxValue 为值区域，+3 为灰色终点+间隔
 ```
 
-每条 bar 的背景区域是：`[红色(1,0,0)] [红黄色(1,1,0)] [值背景像素 × maxValue]`，其上方叠加白色 `StatusBar` 前景。灰色终点不是每条 bar 各自保留一个，而是源码里的 `countBarEndTexture` 复用同一个纹理，每次创建新 bar 时移动到当前最后一条 bar 的末尾。
+每条 bar 的背景区域是：`[红色(1,0,0)] [红黄色(1,1,0)] [值背景像素 × maxValue]`，其上方叠加白色 `StatusBar` 前景。背景色块通过 `for i = -1, maxValue do` 循环创建（共 `maxValue+2` 个色块：两个标记色块 + `maxValue` 个值色块）。`StatusBar` 的 `SetPoint` 定位 `(startIndex - 1) * BAR_CONFIG.width` 与背景中 `i=0` 的 `(1,1,0)` 色块对齐，因此白色填充覆盖 `(1,1,0)` 标记色块的位置。灰色终点不是每条 bar 各自保留一个，而是源码里的 `countBarEndTexture` 复用同一个纹理，每次创建新 bar 时移动到当前最后一条 bar 的末尾。
 
 多条 bar 按创建顺序从左到右排列，共享一个灰色终点纹理（每次创建新 bar 时移动到新位置）。Python 端通过 `seg_idx`（段索引）区分不同 bar，`bar_data[1]` 对应 `config.yml` 中 `bar: 1` 的字段，`bar_data[2]` 对应 `bar: 2`，依此类推。
 
@@ -584,7 +589,7 @@ Fuyutsui 也确实使用了 `C_UnitAuras`，但它不是玩家逻辑光环的主
 
 - `UNIT_AURA` 触发时，`GetDefensiveAuraInstanceID()` 只处理 `unit == "player"`。
 - 它读取 `C_UnitAuras.GetBuffDataByIndex(unit, i, "HELPFUL|BIG_DEFENSIVE")` 的前两个增益。`"BIG_DEFENSIVE"` 是 WoW 的光环分类标签，指大型防御技能（如盾墙、圣佑术等）。
-- 找到后保存 `auraInstanceID`。注意：循环无 break，后一个有效的防御光环会覆盖前一个保存的 auraInstanceID。如果两个防御光环同时存在，前一个无法被独立追踪，最终只追踪最后找到的实例。
+- 找到后保存 `auraInstanceID`。注意：循环中通过 `issecretvalue(aura)` 过滤被标记为秘密的防御光环（main.lua:766），因此被 WoW 标记为 secret 的防御技能不会被追踪，无论其是否在 `BIG_DEFENSIVE` 分类中。此外循环无 break，后一个有效的防御光环会覆盖前一个保存的 auraInstanceID。如果两个防御光环同时存在，前一个无法被独立追踪，最终只追踪最后找到的实例。
 - `GetDefensiveAuraDuration()` 再用 `C_UnitAuras.GetAuraDuration("player", auraInstanceID)` 取剩余时间。
 
 防御光环的时间映射使用 `C_CurveUtil` 而不是简单的 `/255`：
@@ -634,3 +639,10 @@ self:CreatTexture(blocks.state["防御光环"], b)
 | 2026-05-30 | 总链路第3.5步（第17行） | Theta 审核：遗漏 UNIT_SPELLCAST_SUCCEEDED 的 isSec 守卫 | 将守卫列表补全为 SPELL_UPDATE_COOLDOWN、SPELL_UPDATE_ICON 和 UNIT_SPELLCAST_SUCCEEDED |
 | 2026-05-30 | 第3.5步附近新增说明 | Theta 审核：遗漏 noSecretAuras 死代码说明 | 新增关于 Fuyutsui.noSecretAuras 表为死代码的注 |
 | 2026-05-30 | "写 mod 时要注意"（第620行） | Theta 审核：同一遗漏 | 将守卫列表补全为 SPELL_UPDATE_COOLDOWN、SPELL_UPDATE_ICON 和 UNIT_SPELLCAST_SUCCEEDED |
+| 2026-05-30 | 总链路 — 第19行 (issecretvalue 描述) | Theta 审核：issecretvalue 实现不可从源码验证，违反写作约定第5条 | 将「issecretvalue 守卫仅调用 C_Spell.IsSecretSpell」改为「issecretvalue 是 WoW 内置全局函数，实现不可从源码验证」 |
+| 2026-05-30 | isIcon 字段（第144行后） | Theta 审核：遗漏 updateAuraByIcon 对 removeAuras 与非图标事件的语义差异说明 | 增加说明：图标改变事件中 removeAuras 不会执行移除而是重新检查图标覆盖 |
+| 2026-05-30 | isIcon 字段（第148行附近） | Theta 审核：遗漏 PLAYER_TALENT_UPDATE 也不调用 updateAuraIconByEnteringWorld | 补充说明切换专精后 isIcon 光环图标覆盖状态不会立即初始化 |
+| 2026-05-30 | 发光高亮的轮询确认（第257行附近） | Theta 审核：遗漏 updateAuraByOverlayGlow 不调用 clearAurasFromRemoveMap | 增加说明：发光高亮光环的层数不受发光事件直接影响，仅通过过期检查归零 |
+| 2026-05-30 | countBars 编码方式 — 背景色块循环范围（第564行附近） | Theta 审核：遗漏背景 for i=-1,maxValue 循环说明 | 补充背景色块循环范围和 StatusBar SetPoint 与 i=0 色块对齐的说明 |
+| 2026-05-30 | countBars 编码方式 — StatusBar 宽度 +1 像素（第565行附近） | Theta 审核：遗漏 +1 宽度确保满格完全覆盖说明 | 在代码片段中加入 bar:SetSize(barWidth+1) 及注释 |
+| 2026-05-30 | 真实 Aura API — GetDefensiveAuraInstanceID（第587行附近） | Theta 审核：遗漏 issecretvalue(aura) 过滤被标记为秘密的防御光环 | 增加 issecretvalue(aura) 过滤说明，以及被标记为 secret 的防御技能不会被追踪 |
