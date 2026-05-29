@@ -10,3 +10,4 @@
 - [玩家光环](玩家光环/readme.md)：解释玩家 Buff、Debuff、Aura 的逻辑状态、持续时间、层数和像素读取方式。
 - [敌对光环](敌对光环/readme.md)：分析当前 Fuyutsui 是否能读取敌对目标身上的玩家 Debuff，以及 Aura、像素和 Python 配置链路的缺口。
 - [队友状态](队友状态/readme.md)：解释队友血量、职责/距离、增益、可驱散状态和 group 像素槽如何传给 Python。
+- [按键映射与动作输出](按键映射与动作输出/readme.md)：解释职业 keymap、`get_hotkey(unit, spell)`、单位编号到按键映射和 `send_key_to_wow` 后台按键发送流程。
