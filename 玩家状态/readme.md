@@ -195,7 +195,10 @@ local staggerPercent = damage / maxHealth * 100
 | `UNIT_SPELLCAST_FAILED` | `updateSpellFailed()` | `isSec(spellID)` | 若 spellID 受保护，跳过 `updateSpellFailed`，不记录法术失败 |
 | `UNIT_SPELLCAST_SENT` | 事件处理器 | `isSec(targetName)` | 若目标名受保护，阻止设置 `state.castTargetIndex`/`castTargetName`/`castTargetUnit` |
 | `UNIT_DIED` | 事件处理器 | `isSec(unitGUID)` | 若 unitGUID 受保护，跳过 `updateUnitDeath`，不检测该单位死亡 |
-| `SPELL_UPDATE_COOLDOWN` | `updateDrinkStatus()` 所在事件处理器（实际跳过的是 `updateAuraBySpellCooldown`） | `isSec(spellID)` | 若 spellID 受保护，跳过 `updateAuraBySpellCooldown`，不通过冷却事件同步光环结束时间与层数 |
+| `SPELL_UPDATE_COOLDOWN` | `updateAuraBySpellCooldown()` 所在的事件处理器 | `isSec(spellID)` | 若 spellID 受保护，跳过 `updateAuraBySpellCooldown`，不通过冷却事件同步光环结束时间与层数 |
+
+
+> 注意：`Fuyutsui/core/config.lua` 中定义了 `Fuyutsui.noSecretAuras` 表，包含唤魔师、德鲁伊、牧师、武僧、萨满、圣骑士等治疗/辅助专精的 30 余个光环法术 ID，语义上标记这些光环不应受 isSec 保护层影响。但全代码库搜索确认没有任何运行时代码（`main.lua`、`auras.lua`、`core.lua`、`class/*.lua`）读取或引用该表。这是一个已定义但完全不被消费的死代码结构。浏览 `config.lua` 的 mod 作者可能误认为存在针对这些光环的 isSec 豁免机制，但实际上该表无任何运行时效果。上表中描述的所有豁免行为均基于 WoW 内置的 `issecretvalue()` 全局函数，与此表无关。
 
 在大秘境或评级 PvP 等受保护内容中运行 mod 时，这些拦截的具体影响包括：
 
@@ -429,7 +432,7 @@ state_dict["group"]["1"]["驱散"]
 
 另一个配置问题是 `config.yml` 中战士武器专精（专精 1）的 `顺劈斩高亮` 和 `致死高亮` 都配置为 `step: 25`（对应同一像素位置）。Python `build_state_dict` 按字段名分别读入状态字典，但两个字段读取相同的像素值，且 Lua 端只能往一个 step 写一个值，导致其中一个字段始终读到错误值。第三方作者应避免为不同字段配置相同 step。
 
-类似的冲突也出现在死亡骑士鲜血专精（专精 3）中：`脓疮毒镰2` 和 `枯萎凋零` 均配置为 `step: 48`，且 `config.yml` 的 Lua index 48 对应 `脓疮毒镰2`、index 49 对应 `枯萎凋零`，但 config 缺少 step 49 映射，使得 `枯萎凋零` 字段的像素值实际来自 Lua 对 index 49 的写入而非 index 48。此问题不限于战士，在死亡骑士等其他职业配置中同样存在。
+类似的冲突也出现在死亡骑士鲜血专精（专精 3）中：`脓疮毒镰2` 和 `枯萎凋零` 均配置为 `step: 48`，Python 的 `build_state_dict` 对两者均从同一像素位置 `row_data[48]` 读取值，该位置对应 Lua index 48（`脓疮毒镰2` 的光环剩余时间）。因此 `枯萎凋零` 字段在 `state_dict` 中实际包含的是 `脓疮毒镰2` 的数值，而非 `枯萎凋零` 自身的剩余时间。配置缺少 step 49 映射意味着 Lua 对 index 49 写入的 `枯萎凋零` 真实值不会被任何 Python 字段读取。此问题不限于战士，在死亡骑士等其他职业配置中同样存在。
 
 ## 职业专精额外 block 字段
 
@@ -690,3 +693,6 @@ countBars 的 StatusBar 在 Fuyutsui > core/block.lua 注册了三个事件（`S
 | 2026-05-30 | Iota | 能量值和职业资源 — 受影响职业列表 | Theta 最终审校 | 补充恶魔猎手（怒意/痛苦）至受影响职业列表 |
 | 2026-05-30 | Iota | 目标类型 | Theta 最终定稿 | 修正 dispelAbilities 表示例中的错误法术 ID，将 528（实际位于 offensiveDispelAbilities）替换为 dispelAbilities[1] 中的 527、4987、88423 |
 | 2026-05-30 | Iota | 生命值 | Theta 最终定稿 | 修正 UNIT_HEAL_PREDICTION 延迟描述：从"最多 1 帧"改为轮转机制准确表述（N-1 帧，30 人团队最多约 29 帧/483ms） |
+| 2026-05-30 | Iota | 职业专精额外 block 字段 — 死亡骑士 step 冲突 | Theta 终审修正 | 修正数据流向描述：脓疮毒镰2与枯萎凋零共享 step 48，Python 均从 row_data[48]（Lua index 48）读取，枯萎凋零字段实际包含脓疮毒镰2数值；缺少 step 49 意味着 Lua index 49 的真实枯萎凋零值不被任何 Python 字段读取 |
+| 2026-05-30 | Iota | 受保护值(isSec)对事件链的影响 — 汇总表 SPELL_UPDATE_COOLDOWN 行 | Theta 终审修正 | 修正函数列为 `updateAuraBySpellCooldown()` 所在的事件处理器，移除与 `updateDrinkStatus` 的错误关联 |
+| 2026-05-30 | Iota | 受保护值(isSec)对事件链的影响 — 汇总表后 | Theta 终审修正 | 新增注释说明 `Fuyutsui.noSecretAuras` 表已定义但无运行时代码消费，isSec 拦截完全由 WoW 内置 `issecretvalue()` 驱动 |
