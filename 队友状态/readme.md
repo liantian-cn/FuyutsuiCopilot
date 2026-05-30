@@ -95,6 +95,8 @@ row_key = base_step + rel_step
 
 Python 固定解析 30 个槽位，生成 `state_dict["group"]["1"]` 到 `state_dict["group"]["30"]`。Lua 只会主动刷新当前遍历到的队伍成员；如果某个像素槽没有被写入，Python 会读成 0，但当前源码没有在重新建组时清空全部 group 槽位，旧槽位可能残留。
 
+`clearGroupBlocks`（`Fuyutsui/main.lua > Fuyutsui > clearGroupBlocks`）从 `blocks.groups.start` 一直清零到 255，这会覆盖同一像素区间内其他模块（如 spells、auras）已写入的像素数据。例如，当前 spells 配置在索引 31-46 区间、auras 在 47-69 区间、group 从索引 70 开始，三者不重叠；但若自定义配置将 spells 或 auras 的像素索引设置在 `blocks.groups.start` 之后时，调用 `clearGroupBlocks` 会将这些模块的数据一并清空。该函数当前未被 `updateGroup()` 主动调用，因此上述风险暂未暴露；但未来若主动使用或 mod 作者在回调中引用时，需确保其他模块的像素索引排在 group 范围之前，或以 `blocks.groups.start` 为上限分段清零。
+
 ## 队友列表来自哪里
 
 队友单位由 `Fuyutsui:IterateGroupMembers()` 生成：
@@ -187,7 +189,7 @@ self:CreatTexture(index, obj.healthPercent)
 
 注意当前 helpfulSpells 只覆盖了牧师（快速治疗、祈福、暗影愈合）、圣骑士（圣光术、圣光闪现）、德鲁伊（愈合）、萨满（治疗波）。织雾武僧的活血术/氤氲之雾和戒律牧师的苦修等主要单体治疗法术不在其中。
 
-`UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 仅通过 `updateUnitDeathByHealthInfo` 更新死亡/有效状态，不触发血量像素重新计算。血量像素由 `updateGroupInRangeAndHealth` 每帧按 `updateIndex` 轮询一个成员时调用 `updateUnitHealthInfo` 重新计算，刷新频率取决于轮询周期（单帧仅处理一个成员），与事件触发频率无关。注意：这些事件同样会更新玩家自身的血量显示。`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`（`main.lua > Fuyutsui > UNIT_HEAL_ABSORB_AMOUNT_CHANGED`）在 `unit == "player"` 时调用 `self:updatePlayerHealth()`，与 `UNIT_HEALTH` / `UNIT_MAXHEALTH` / `UNIT_HEAL_PREDICTION` 的行为一致。
+`UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 仅通过 `updateUnitDeathByHealthInfo` 更新死亡/有效状态，不触发血量像素重新计算。其中 `UNIT_HEAL_PREDICTION`（治疗预判事件，不改变实际血量值）被包含在此列表中是防御性覆盖设计：在下线、切区域等场景中，`UnitIsDeadOrGhost` 的状态变化有时通过 `UNIT_HEAL_PREDICTION` 传播——该事件是客户端收到 unit 状态刷新的信号之一，即使不修改血量值也可作为死亡检测更新的额外驱动路径。血量像素由 `updateGroupInRangeAndHealth` 每帧按 `updateIndex` 轮询一个成员时调用 `updateUnitHealthInfo` 重新计算，刷新频率取决于轮询周期（单帧仅处理一个成员），与事件触发频率无关。注意：这些事件同样会更新玩家自身的血量显示。`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`（`main.lua > Fuyutsui > UNIT_HEAL_ABSORB_AMOUNT_CHANGED`）在 `unit == "player"` 时调用 `self:updatePlayerHealth()`，与 `UNIT_HEALTH` / `UNIT_MAXHEALTH` / `UNIT_HEAL_PREDICTION` 的行为一致。
 
 注意：死亡状态检测由三个独立的路径覆盖。第一条路径 `updateUnitDeath` 通过 GUID 匹配直接将 `isDead` 置为 true，由 `UNIT_DIED` 事件触发（先经 `isSec` 过滤），适用于游戏明确发出死亡事件的场景。第二条路径 `updateUnitDeathByHealthInfo` 通过实时查询 `UnitIsDeadOrGhost` API 更新状态，由 `UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 等血量相关事件触发，适用于 `UnitIsDeadOrGhost` 状态已变更但未收到 `UNIT_DIED` 事件的场景（如下线、切区域）。第三条路径 `updateGroupInRangeAndHealth()` 按 `updateIndex` 在每帧轮询当前成员时直接调用 `UnitIsDeadOrGhost(unit)`，将结果写入 `obj.isDead`（`main.lua > Fuyutsui > updateGroupInRangeAndHealth`）。该路径与事件驱动路径的本质差异在于：无需等待 `UNIT_DIED` 或血量事件，每个成员每帧轮询一次。因此 `isDead` 的刷新频率取决于队伍人数——每帧仅处理一名成员，而非事件触发时立即更新。三者共同保证死亡状态的覆盖，但调用路径和触发条件不同。
 
@@ -354,6 +356,8 @@ num: 4
 
 队友驱散输出在 `UNIT_AURA()` 中刷新。需要注意的是，`getAuraDispelTypeColor()` 函数入口会检查 `if not blocks.groups or not obj then return end`（`main.lua > (local function) > getAuraDispelTypeColor`），`UNIT_AURA` 事件处理也会检查 `if not obj then return end`（`main.lua > Fuyutsui > UNIT_AURA`），确认目标单位已在 group 表中才会处理。因此对宠物、非队伍友方等非 group 成员触发的 `UNIT_AURA` 不会写入驱散像素。
 
+`UNIT_AURA` 事件处理函数（`Fuyutsui/main.lua > Fuyutsui > UNIT_AURA`）中 `getAuraDispelTypeColor(unit)` 在 `addedAuras`、`updatedAuraInstanceIDs`、`removedAuraInstanceIDs` 等缓存更新之前执行。但由于 `getAuraDispelTypeColor` 通过 `C_UnitAuras.GetUnitAuraInstanceIDs` 直接查询游戏 API 而非依赖 `obj.aura` 缓存，此执行顺序差异在功能上无实际影响，仅为实现细节。
+
 ```lua
 local auraInstanceIDs = C_UnitAuras.GetUnitAuraInstanceIDs(
     unit,
@@ -396,6 +400,8 @@ Fuyutsui:CreatTexture(index, color.b)
 Python 端读到的整数值直接等于驱散类型编号（1=魔法、2=诅咒、3=疾病、4=中毒、11=流血）。这是通过 Lua 的 `dispelCurve:AddPoint(i, CreateColor(0, 1, i/255, 1))`（`main.lua > Fuyutsui > updateSpellKnown`）编码的：B 通道写入 i/255，Python 读回整数 i。
 
 当玩家未学会对应驱散法术时，`dispelCurve` 在该点写入 0（`main.lua > Fuyutsui > updateSpellKnown`），Python 读到 0。流血类型（`main.lua > (module-level) > dispelAbilities` — dispelAbilities[11] = {} 为空）也是如此，因此通常输出 0。
+
+`updateSpellKnown`（`Fuyutsui/main.lua > Fuyutsui > updateSpellKnown`）在同一函数中同时初始化三条独立的颜色曲线：`dispelCurve`（队友驱散）、`target.friendCurve`（目标友方驱散）和 `target.enemyCurve`（目标敌方驱散）。其中 `target.enemyCurve` 由 `offensiveDispelAbilities`（`main.lua > (module-level) > offensiveDispelAbilities`）填充，其编码逻辑为：魔法（dispel type 1）映射为值 2，激怒（dispel type 9）映射为值 3。由于三条曲线的生成逻辑共用同一函数，修改 `updateSpellKnown` 时可能无意影响 `target.enemyCurve` 的输出，mod 作者在修改该函数时应知晓此连带影响。此外，`loadPlayerBlocks()` 在 `updateSpellKnown` 之后调用（`main.lua > Fuyutsui > loadPlayerBlocks > updateSpellKnown`），因此 `dispelAbilities`、`offensiveDispelAbilities` 在职业配置加载前已就绪。
 
 注意：如上表所示，文档的驱散类型编号与 dispelAbilities 索引一致（2=诅咒、3=疾病）。但 `main.lua > Fuyutsui > updateSpellKnown` 中 dispelCapabilities 的注释将 [2] 和 [3] 的标签写反了，应以 dispelAbilities 的法术 ID 分类为准。
 
@@ -581,3 +587,7 @@ Python `config.yml` 中实际配置了这些 group 字段：
 | 2026-05-30 | Python 如何使用队友信息（函数表） | Theta 审核：get_count_units_below_health() 和 count_units_below_health() 的 health_threshold 签名不同，count_units_without_aura_below_health() 的 health_threshold 为必填 | 在合并条目中标注参数签名差异；count_units_without_aura_below_health 标注为必填参数 |
 | 2026-05-30 | 队友可驱散状态（驱散类型表格注释） | Iota 执行 Theta 审核：88423 注释未涵盖其他跨类型 spellId 重叠 | 将 88423 单一注释扩展为「注释：spellId 跨上下文/跨类型使用说明」，按顺序说明 88423 双重角色、诅咒/中毒重叠（2782、392378）、疾病/中毒重叠（393024、213644、388874、218164），以及 `hasLearnedAnySpell` 逐类型 OR 判断的行为后果 |
 | 2026-05-30 | 全文 | Iota 执行 Theta 审核：残留的 `文件:行号` 引用已过期 | 将所有 `file:line` 引用替换为 `文件 > 类 > 函数` 调用链定位格式 |
+| 2026-05-30 | 队友可驱散状态（offensiveDispelAbilities） | Iota 执行 Theta 审核：遗漏 offensiveDispelAbilities 和 target.enemyCurve 的说明 | 补充 updateSpellKnown 同时初始化 dispelCurve、target.friendCurve、target.enemyCurve 三条曲线；target.enemyCurve 由 offensiveDispelAbilities（魔法→2、激怒→3）填充；说明修改该函数的连带影响 |
+| 2026-05-30 | 队友槽位如何排列（clearGroupBlocks 风险） | Iota 执行 Theta 审核：clearGroupBlocks 清零风险缺少具体场景示例 | 补充自定义配置落入重叠范围时的风险说明，及分段清零建议 |
+| 2026-05-30 | 血量（UNIT_HEAL_PREDICTION 事件说明） | Iota 执行 Theta 审核：未解释 UNIT_HEAL_PREDICTION 包含在死亡检测事件列表中的原因 | 补充防御性覆盖设计：在下线、切区域等场景中该事件作为 unit 状态刷新信号 |
+| 2026-05-30 | 队友可驱散状态（UNIT_AURA 执行顺序） | Iota 执行 Theta 审核：未说明 getAuraDispelTypeColor 在缓存更新前执行 | 补充执行顺序差异说明，并指出因直接查 API 而非依赖 obj.aura 缓存故无实际影响 |
