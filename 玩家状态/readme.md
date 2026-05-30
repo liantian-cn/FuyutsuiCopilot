@@ -115,6 +115,8 @@ self:CreatTexture(blocks.state["生命值"], b)
 
 `curve100` 把百分比映射到 B 通道，Python 读到的值通常是 1-100 的整数百分比。注意 curve100 在参数 b=100 时 z=0，产生三个控制点 (0,0)、(0,1/255)、(1,100/255)，第二个点覆盖第一个点后等效映射为 B=(1+99*t)/255。50% 血量时 B=50.5/255，Python 读到约 51 而非 50。除 100% 血量外，全范围存在约 +1 的系统偏移。此外 `creatColorCurveScaling` 在 b>100 时还有一个分支（Fuyutsui > main.lua > creatColorCurveScaling），创建仅含两个控制点 (0, (b-100)/255) 和 (1, b/255) 的曲线，产生不同于 b<=100 三控制点曲线的偏移起点。此分支在运行时可通过 updateUnitHealthInfo（Fuyutsui > main.lua > updateUnitHealthInfo 的 100 + inComingHeals - healAbsorb）在 inComingHeals > healAbsorb 时进入，常见于团队治疗场景。`creatColorCurveScaling` 使用模块级 `local curveCache = {}`（Fuyutsui > main.lua > curveCache 模块级声明）按参数 b 缓存 ColorCurve 对象：首次以参数 b 为键创建曲线后缓存于 `curveCache[b]`，后续相同 b 值的调用直接返回同一曲线对象。mod 作者若需为不同 inComingHeals/healAbsorb 组合动态创建多条曲线，应注意相同 b 值始终映射到同一曲线对象这一约束。`UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 都会触发玩家血量刷新。但 `UNIT_HEAL_PREDICTION` 对队伍成员的行为不对称：当事件 unit 是玩家自身时，调用 `updatePlayerHealth()` 刷新血量像素；当 unit 是队伍成员时（main.lua 中 group[unit] 分支），仅调用 `updateUnitDeathByHealthInfo()` 检测死亡，不调用 `updateUnitHealthInfo()` 刷新血量像素。队伍成员的治疗预估变化不会立即触发血量像素刷新；血量像素更新依赖 OnUpdate 每帧轮转的 `updateGroupInRangeAndHealth` 在下一次轮转至此成员时生效，引入一个取决于队伍大小与轮转位置的延迟——`updateGroupInRangeAndHealth` 每次 OnUpdate 仅更新一名成员（通过 `updateIndex` 轮转），治疗预估变化需等轮转至此成员时才会刷新血量像素。最坏情况下延迟可达 N-1 帧（5 人队伍最多约 4 帧/67ms，30 人团队最多约 29 帧/483ms）。依赖治疗预估事件观察队友血量的 mod 作者需注意此差异。
 
+`UNIT_MAXHEALTH` 处理器存在相同的队伍成员不对称行为：当事件 `unit` 是队伍成员时，仅调用 `updateUnitDeathByHealthInfo()` 检测死亡状态，不调用 `updateUnitHealthInfo()` 刷新血量像素。队伍成员的最大血量变化后，血量像素需依赖 `OnUpdate` 轮转才能更新。
+
 这里读的是百分比，不是当前血量数值，也不是最大血量数值。Python 职业逻辑通常直接比较：
 
 ```python
@@ -138,7 +140,7 @@ self:updatePlayerPower(powerType)
 
 - 最大值大于等于 250：按 0-100 输出百分比，适合法力这类大资源。
 - 最大值小于 250：按 0-`powerMax` 输出实际点数，适合能量、怒气等较小资源。
-- EnumPowerType 映射表定义在 Fuyutsui > core/config.lua > EnumPowerType：MANA=0、RAGE=1、FOCUS=2、ENERGY=3、COMBO_POINTS=4、RUNES=5、RUNIC_POWER=6、SOUL_SHARDS=7、LUNAR_POWER=8、HOLY_POWER=9、MAELSTROM=11、CHI=12、INSANITY=13、BURNING_EMBERS=14（历史遗留，当前版本已移除）、DEMONIC_FURY=15（历史遗留，当前版本已移除）、ARCANE_CHARGES=16、FURY=17、PAIN=17（注：PAIN 与 FURY 共享 ID 17）、ESSENCE=19、SHADOW_ORBS=28。
+- EnumPowerType 映射表定义在 Fuyutsui > core/config.lua > EnumPowerType：MANA=0、RAGE=1、FOCUS=2、ENERGY=3、COMBO_POINTS=4、RUNES=5、RUNIC_POWER=6、SOUL_SHARDS=7、LUNAR_POWER=8、HOLY_POWER=9、MAELSTROM=11、CHI=12、INSANITY=13、BURNING_EMBERS=14（历史遗留，当前版本已移除）、DEMONIC_FURY=15（历史遗留，当前版本已移除）、ARCANE_CHARGES=16、FURY=17、PAIN=17（注：PAIN 与 FURY 共享 ID 17）、ESSENCE=19、SHADOW_ORBS=28。注意值 10（ALTERNATE_POWER）在映射表中缺失，`EnumPowerType[10]` 返回 nil 将导致 `UnitPowerMax`/`UnitPower` 回退默认主资源，产生不可预期结果。
 - `CreatPowerCurve(powerType)` 有永久缓存机制：首次为某资源类型创建曲线后缓存于 `powerCurve[powerType]`，后续调用直接返回缓存（Fuyutsui > main.lua > CreatPowerCurve > powerCurve 缓存 `if powerCurve[powerType] then return end`）。这意味着曲线在运行期间不会因资源最大值变化（如专精切换、等级提升）而更新。注意 `powerCurve` 声明为 `local powerCurve = {}`（Fuyutsui > main.lua 模块级局部变量），不属于 Fuyutsui 表命名空间（例如不是 `Fuyutsui.powerCurve`），第三方 addon 无法通过 Fuyutsui API 访问、检查或清除该缓存。此处的双重保障设计值得注意：`updatePlayerPowerType` 先显式调用 `CreatPowerCurve(powerType)` 确保缓存存在，再调用 `updatePlayerPower(powerType)` 消费缓存——这是第一道防线，从调用时序上保障先创建后消费。而 `updatePlayerPower` 的 `isSec(power)` 分支内又包含 `if not powerCurve[powerType] then self:CreatPowerCurve(powerType) end` 防御性检查——这是第二道防线，兜底处理缓存未预填充的边缘情况。这一设计模式体现了从调用时序保障到函数内部防御性检查的双层安全性。
 
 `updatePlayerPower(powerType)` 还有一个特殊资源分支：
@@ -206,6 +208,7 @@ local staggerPercent = damage / maxHealth * 100
 | `UNIT_SPELLCAST_SENT` | 事件处理器 | `isSec(targetName)` | 若目标名受保护，阻止设置 `state.castTargetIndex`/`castTargetName`/`castTargetUnit` |
 | `UNIT_DIED` | 事件处理器 | `isSec(unitGUID)` | 若 unitGUID 受保护，跳过 `updateUnitDeath`，不检测该单位死亡 |
 | `SPELL_UPDATE_COOLDOWN` | `updateDrinkStatus()` 所在事件处理器（实际跳过的是 `updateAuraBySpellCooldown`） | `isSec(spellID)` | 若 spellID 受保护，跳过 `updateAuraBySpellCooldown`，不通过冷却事件同步光环结束时间与层数 |
+| `SPELL_UPDATE_ICON` | `updateAuraByIcon()` | `isSec(spellID)` | 若 spellID 受保护，跳过 `updateAuraByIcon`，无法通过图标变化事件更新光环图标覆盖状态和到期时间 |
 
 在大秘境或评级 PvP 等受保护内容中运行 mod 时，这些拦截的具体影响包括：
 
@@ -214,6 +217,8 @@ local staggerPercent = damage / maxHealth * 100
 - `updateAuraBySuccess` 被跳过 -> 成功施法无法触发光环更新。
 - `updateSpellFailed` 被跳过 -> 法术失败像素不会写入，`法术失败` 字段停留在旧值或 0。
 - `castTargetIndex`/`castTargetName`/`castTargetUnit` 不被设置 -> 施法目标追踪在大秘境中不可用。
+
+`Fuyutsui.noSecretAuras` 表（定义于 Fuyutsui > core/config.lua）包含约 30 个治疗/增益法术 ID（唤魔师回响/逆转、德鲁伊回春/愈合、牧师盾/救赎等），作为 `isSec` 保护的豁免列表。但全代码库中无任何运行时代码读取该表，属于死代码结构。浏览配置的 mod 作者需注意此豁免机制不存在于运行时逻辑中。
 
 此外，`core.lua` 的 `OnEnable` 中还注册了 `COOLDOWN_VIEWER_SPELL_OVERRIDE_UPDATED` 事件，`main.lua` 中有完整处理函数调用 `updateAuraBySpellOverride`（`auras.lua` 有完整实现）。该事件是光环（aura）数据更新路径的一条正式入口，但不属于 isSec 拦截范畴——不受 isSec 守卫影响，始终正常触发光环数据刷新。
 
@@ -473,6 +478,8 @@ state_dict["group"]["1"]["驱散"]
 注意 ClassBlocks 中的 `powerType` 字段（如 Paladin.lua 专精3 声明的 `powerType = "MANA"`）是死配置——`loadPlayerBlocks()`（Fuyutsui > main.lua > loadPlayerBlocks 非条目字段跳过）使用 `if type(v) ~= 'table' or not v.type then` 明确跳过非条目字段，`updatePlayerPowerType()`（Fuyutsui > main.lua > updatePlayerPowerType）总是使用 `UnitPowerType("player")` 运行时 API 而非 ClassBlocks 的 powerType。mod 作者不应依赖 ClassBlocks powerType 来预期能量类型变更。
 
 源码的 `updateItemCoolDown()` 还支持 `大蓝冷却` 和 `圣光潜力冷却`，但当前职业 `ClassBlocks` 和 `config.yml` 中没有看到它们作为实际输出字段。
+
+治疗石冷却仅存在于 warlock 专精 2（demonology）的 `ClassBlocks` 和 `config.yml`；鲁莽药水冷却仅存在于 deathknight 专精 3（blood）的 `ClassBlocks` 和 `config.yml`；其他专精无对应字段输出。
 
 ## 形态、姿态和坐骑的关系
 
@@ -740,3 +747,8 @@ countBars 的 StatusBar 在 Fuyutsui > core/block.lua 注册了三个事件（`S
 | 2026-05-30 | Iota | 职业专精额外 block 字段 — 延迟分类 | Theta 最终审定 | 将延迟从用户开关行移出，新建临时开关独立类别 |
 | 2026-05-30 | Iota | 物品状态为什么也算 block | Theta 最终审定 | 修正物品冷却 value 编码描述：math.min 结果直接作为 CreatTexture b 参数（不再次除以 255），B=1 时 Python 读到 255 而非 1 |
 | 2026-05-30 | Iota | 写 mod 时要注意 — 法师偏移 | Theta 最终审定 | 补充专精 1（奥术）和专精 2（火焰）ClassBlocks 仅含 index 1-20 基本块，偏移问题仅影响专精 3（冰霜） |
+| 2026-05-30 | Iota | 生命值 | Theta 最终审查 | 补充 UNIT_MAXHEALTH 对队伍成员不对称行为说明：当事件 unit 为队伍成员时仅检测死亡不刷新血量像素 |
+| 2026-05-30 | Iota | 能量值和职业资源 — EnumPowerType 映射表 | Theta 最终审查 | 补充值 10（ALTERNATE_POWER）在映射表中缺失的注释 |
+| 2026-05-30 | Iota | 受保护值(isSec)对事件链的影响 | Theta 最终审查 | 补充 Fuyutsui.noSecretAuras 表为死代码结构的说明 |
+| 2026-05-30 | Iota | 职业专精额外 block 字段 | Theta 最终审查 | 补充治疗石冷却（warlock 专精 2）和鲁莽药水冷却（deathknight 专精 3）的专精特异性标注 |
+| 2026-05-30 | Iota | 受保护值(isSec)对事件链的影响 — isSec 拦截汇总表 | Theta 终审 | 在 SPELL_UPDATE_COOLDOWN 后新增 SPELL_UPDATE_ICON 行：isSec(spellID) 跳过 updateAuraByIcon，无法通过图标变化事件更新光环图标覆盖状态和到期时间 |
