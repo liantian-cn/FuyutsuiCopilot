@@ -1,6 +1,8 @@
 # 玩家状态
 
-本文说明 Fuyutsui 除技能冷却和普通玩家光环以外，如何读取并传递玩家相关状态。这里的“玩家状态”主要指 `type = "block"` 写入顶部像素条、再被 Python 解码进 `state_dict` 的字段；技能冷却见 `技能冷却/readme.md`，玩家逻辑光环见 `玩家光环/readme.md`。
+> **目录说明**：本文档保存于 `队友状态/` 目录，但其内容为「玩家状态」。原独立的「队友状态」文档（以队友血量、职责与距离有效性、可驱散类型、队伍光环为主题）已在历次修订中整合进本文的队伍状态章节。`玩家状态/readme.md` 亦包含相同的玩家状态说明。
+
+本文说明 Fuyutsui 除技能冷却和普通玩家光环以外，如何读取并传递玩家相关状态。这里的”玩家状态”主要指 `type = “block”` 写入顶部像素条、再被 Python 解码进 `state_dict` 的字段；技能冷却见 `技能冷却/readme.md`，玩家逻辑光环见 `玩家光环/readme.md`。
 
 需要先明确两个结论：
 
@@ -696,3 +698,4 @@ countBars 的 StatusBar 在 Fuyutsui > core/block.lua 注册了三个事件（`S
 | 2026-05-30 | Iota | 职业专精额外 block 字段 — 死亡骑士 step 冲突 | Theta 终审修正 | 修正数据流向描述：脓疮毒镰2与枯萎凋零共享 step 48，Python 均从 row_data[48]（Lua index 48）读取，枯萎凋零字段实际包含脓疮毒镰2数值；缺少 step 49 意味着 Lua index 49 的真实枯萎凋零值不被任何 Python 字段读取 |
 | 2026-05-30 | Iota | 受保护值(isSec)对事件链的影响 — 汇总表 SPELL_UPDATE_COOLDOWN 行 | Theta 终审修正 | 修正函数列为 `updateAuraBySpellCooldown()` 所在的事件处理器，移除与 `updateDrinkStatus` 的错误关联 |
 | 2026-05-30 | Iota | 受保护值(isSec)对事件链的影响 — 汇总表后 | Theta 终审修正 | 新增注释说明 `Fuyutsui.noSecretAuras` 表已定义但无运行时代码消费，isSec 拦截完全由 WoW 内置 `issecretvalue()` 驱动 |
+| 2026-05-30 | Iota | 全文 | Theta 审查建议 | 在文档开头添加目录说明，指出本文档保存于 `队友状态/` 目录但内容为「玩家状态」，原队友状态内容已整合进队伍状态章节 |
