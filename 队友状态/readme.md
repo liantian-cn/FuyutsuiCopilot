@@ -151,6 +151,8 @@ local specialPowerMap = {
 
 如果当前资源类型在这个表里，并且当前专精有对应 block，Lua 会把 `UnitPower()` 的原始点数写进这些字段。
 
+这里有一个特殊的反面实例：Rogue 的 `COMBO_POINTS` 存在于 `specialPowerMap`（映射为「连击点」）中，但 `Rogue.lua` 三个专精的 `ClassBlocks` 均未声名 `type = "block", name = "连击点"` 条目。因此 `updatePlayerPower` 的 `if not isSec(power) and specialPower` 分支虽然因 `COMBO_POINTS` 命中映射表而进入（`specialPower` 被赋值为 `"连击点"`），但 `blocks.state["连击点"]` 为 `nil`，`CreatTexture(blockIndex, value)` 的 `blockIndex` 参数为 `nil`（对应 `CreatTexture` 内部 `if not blockIndex then return end` 的保护性提前返回），不会产生像素更新。对于调试 Rogue 能量值为何未输出连击点像素的 mod 作者，这是一个有用的教学案例：资源类型在映射表中是进入分支的必要条件，但不是充分条件——还需要 `ClassBlocks` 中定义了对应的 block 条目。同时注意，此空缺是 Rogue 类的整体特性而非某个专精的遗漏：盗贼三系专精（刺杀、狂徒、敏锐）的 `ClassBlocks` 均不声明「连击点」block。
+
 警告：`updatePlayerPower(powerType)` 的三路分支逻辑可能导致多个职业的能量值字段无法通过此函数更新。
 
 - 当 `UnitPower()` 返回受保护值时，走 `UnitPowerPercent()`，写通用 `能量值`。
@@ -376,6 +378,8 @@ Lua 端 `updateGroup()` 会遍历队伍成员，记录：
 - 队伍光环表
 
 > **队伍光环表填充机制**：队伍光环表由 `updateUnitFullAura(unit)` 函数（Fuyutsui > main.lua > updateUnitFullAura）填充。该函数内部以 `for i = 1, 5` 循环调用 `C_UnitAuras.GetBuffDataByIndex(unit, i, 'PLAYER|HELPFUL|RAID_IN_COMBAT')`，因此每个队伍成员最多有 5 个由玩家自身施放的战斗增益被追踪。此约束直接影响队伍光环数据的完整性预期：若队友身上有超过 5 个符合条件的玩家战斗增益，超出部分不会被记录。编写治疗/驱散逻辑的 mod 作者应意识到此限制。`PLAYER` 过滤器前缀的含义是仅追踪由玩家自身施放的光环，而非队友身上的所有光环——这意味着无法通过队伍光环表获取由其他队友施放的增益。
+>
+> 除上述全量更新路径外，还存在 `UNIT_AURA` 事件驱动的 `addedAuras`/`updatedAuraInstanceIDs` 增量更新路径。该路径使用 `not isSec(v.spellId) and v.sourceUnit == 'player'` 独立过滤逻辑（Fuyutsui > main.lua > UNIT_AURA 事件处理器中 addedAuras 增量路径），与全量更新路径的 `PLAYER|HELPFUL|RAID_IN_COMBAT` API 过滤器存在本质差异。增量路径不限制 `RAID_IN_COMBAT`（非战斗状态下也可更新光环数据），但通过 `isSec(spellId)` 保护避免记录受保护法术 ID 的光环，且仅记录由玩家自身施放的光环（`sourceUnit == 'player'`）。这两个不同过滤路径意味着同一队友身上的光环集合在增量更新和全量更新下可能有差异：全量更新受 `RAID_IN_COMBAT` 限制（战斗外不返回光环），增量更新受 `isSec` 和 `sourceUnit` 限制（受保护法术和他人施放的光环不被记录）。依赖队伍光环数据的 mod 作者应同时理解两条路径的边界条件。
 
 写入像素时，每个队友占一段连续 block。Python 端按 `config.yml` 的 `group.start` 和 `group.num` 解析成：
 
@@ -440,7 +444,7 @@ state_dict["group"]["1"]["驱散"]
 
 另一个配置问题是 `config.yml` 中战士武器专精（专精 1）的 `顺劈斩高亮` 和 `致死高亮` 都配置为 `step: 25`（对应同一像素位置）。Python `build_state_dict` 按字段名分别读入状态字典，但两个字段读取相同的像素值，且 Lua 端只能往一个 step 写一个值，导致其中一个字段始终读到错误值。第三方作者应避免为不同字段配置相同 step。
 
-类似的冲突也出现在死亡骑士鲜血专精（专精 3）中：`脓疮毒镰2` 和 `枯萎凋零` 均配置为 `step: 48`，Python 的 `build_state_dict` 对两者均从同一像素位置 `row_data[48]` 读取值，该位置对应 Lua index 48（`脓疮毒镰2` 的光环剩余时间）。因此 `枯萎凋零` 字段在 `state_dict` 中实际包含的是 `脓疮毒镰2` 的数值，而非 `枯萎凋零` 自身的剩余时间。配置缺少 step 49 映射意味着 Lua 对 index 49 写入的 `枯萎凋零` 真实值不会被任何 Python 字段读取。此问题不限于战士，在死亡骑士等其他职业配置中同样存在。
+类似的冲突也出现在死亡骑士邪恶专精（专精 3）中：`脓疮毒镰2` 和 `枯萎凋零` 均配置为 `step: 48`，Python 的 `build_state_dict` 对两者均从同一像素位置 `row_data[48]` 读取值，该位置对应 Lua index 48（`脓疮毒镰2` 的光环剩余时间）。因此 `枯萎凋零` 字段在 `state_dict` 中实际包含的是 `脓疮毒镰2` 的数值，而非 `枯萎凋零` 自身的剩余时间。配置缺少 step 49 映射意味着 Lua 对 index 49 写入的 `枯萎凋零` 真实值不会被任何 Python 字段读取。此问题不限于战士，在死亡骑士等其他职业配置中同样存在。
 
 > **补充说明**：枯萎凋零同时出现在两条数据通道中——作为 aura 由 Lua index 49 写入但无对应 step 映射，作为 spell 由 Lua index 71（冷却）和 index 72（充能）写入并对应 config.yml 中 spells 子字典的凋零冷却和凋零充能配置。模组开发者在处理枯萎凋零相关逻辑时，需注意此跨通道双重身份，并在属于 blocks.spells 范畴的完整冷却/充能语义上参考 `技能冷却/readme.md`。
 
@@ -616,7 +620,7 @@ countBars 的 StatusBar 在 Fuyutsui > core/block.lua 注册了三个事件（`S
 - `延迟` 只由 `/fu delay` 写入，不是 `updatePlayerConfig()` 的初始化输出项。
 - 职业 Lua 里有字段不代表 Python 一定能读到；必须同步 `config.yml`。
 - Python `config.yml` 里有字段也不代表 Lua 一定会写；必须检查是否存在对应 `blocks.state["字段名"]` 更新路径。
-- Lua block index 与 config step 必须严格 1:1 对应。当前代码中存在违反此规则的实例：法师冰霜专精（专精 3）的 `config.yml` 中施法技能 step 22、敌人人数 step 23 比 `Mage.lua` 的 block index（分别为 21、22）偏移了 1，导致 Python 读取的像素值对应错误的 Lua 写入位置。
+- Lua block index 与 config step 必须严格 1:1 对应。当前代码中存在违反此规则的实例：法师冰霜专精（专精 3）的 `config.yml` 中施法技能 step 22、敌人人数 step 23 比 `Mage.lua` 的 block index（分别为 21、22）偏移了 1，导致 Python 读取的像素值对应错误的 Lua 写入位置。此偏移仅存在于法师冰霜专精，其他职业（如战士的 目标生命值→step 21、圣骑士的 神圣能量→step 21 等）的 block index 与 config step 均为 1:1 对齐。
 - 在大秘境和评级 PvP 等受保护场景中，`isSec` 会拦截多项事件处理，导致饮水状态、法术失败记录、施法目标追踪等功能不可用或基于过期数据运行。依赖这些功能的 mod 需注意受保护内容中的行为差异。
 - `inComingHeals` 只覆盖 `helpfulSpells` 表中硬编码的治疗法术，自定义或非标准治疗法术不会产生 `inComingHeals` 曲线影响。
 
@@ -720,3 +724,7 @@ countBars 的 StatusBar 在 Fuyutsui > core/block.lua 注册了三个事件（`S
 | 2026-05-30 | Iota | 队伍状态 — Evoker.lua num 不匹配 | Theta 审核建议 | 删除指向文件自身的循环引用「详见 队友状态/readme.md」 |
 | 2026-05-30 | Iota | 队伍状态 | Theta 审核建议 | 补充 clearGroupBlocks() 函数已定义但无调用点的死代码说明 |
 | 2026-05-30 | Iota | 物品状态为什么也算 block | Theta 最终审校 | 将「value=1」修正为「B=255」：实际存在至少四条路径使 math.min 结果为 1（Lua 侧浮点值），Python 原始 BGRA 字节读到 B=255；补充数据链路说明（CreatTexture 直接将 math.min 浮点结果传入 SetColorTexture B 通道，不再次除以 255） |
+| 2026-05-30 | Iota | 队伍状态 | Theta 审核建议 | 修正死亡骑士专精 3 的标注：将「死亡骑士鲜血专精（专精 3）」修正为「死亡骑士邪恶专精（专精 3）」 |
+| 2026-05-30 | Iota | 能量值和职业资源 | Theta 审核建议 | 补充 Rogue COMBO_POINTS 在 specialPowerMap 中但无对应 block 的反面实例，说明 blocks.state 检查点 |
+| 2026-05-30 | Iota | 队伍状态（队伍光环表填充机制） | Theta 审核建议 | 补充 UNIT_AURA 事件 addedAuras 增量路径的独立过滤逻辑（not isSec(spellId) and sourceUnit == 'player'），与全量更新的 PLAYER|HELPFUL|RAID_IN_COMBAT 差异说明 |
+| 2026-05-30 | Iota | 写 mod 时要注意 | Theta 审核建议 | 补充法师冰霜专精偏移为独立个案说明，其他职业（战士目标生命值→step 21、圣骑士神圣能量→step 21 等）block index 与 config step 均为 1:1 对齐 |
