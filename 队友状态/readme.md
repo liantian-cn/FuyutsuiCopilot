@@ -97,7 +97,9 @@ state.valid = valid and 1 / 255 or 0
 
 注意当前源码里有一个细节：`updateShapeshiftForm()` 把 `state.shapeshiftFormID` 存成 `shapeshiftFormID / 255`，但 `updatePlayerMounted()` 又拿它和原始 ID `27`、`3`、`29` 比较。这意味着“通过变形形态判断坐骑”的分支很可能不起作用；普通坐骑仍由 `IsMounted()` 判断。
 
-此外，在 `updatePlayerBlocks()` 初始化时，`updatePlayerMounted()`（Fuyutsui > main.lua > updatePlayerBlocks 内）在 `updateShapeshiftForm()`（Fuyutsui > main.lua > updatePlayerBlocks 内）之前调用。此时 `state.shapeshiftFormID` 尚为 nil（Fuyutsui > core.lua 初始 state 不含此字段），比较结果为 nil == 27/3/29（均为 false），使得形状变形-坐骑检测路径在初始化时双重失效。
+此外，在 `updatePlayerBlocks()` 初始化时，`updatePlayerMounted()`（Fuyutsui > main.lua > updatePlayerBlocks 内）在 `updateShapeshiftForm()`（Fuyutsui > main.lua > updatePlayerBlocks 内）之前调用。此时 `state.shapeshiftFormID` 尚为 nil（Fuyutsui > core/core.lua 初始 state 不含此字段），比较结果为 nil == 27/3/29（均为 false），使得形状变形-坐骑检测路径在初始化时双重失效。
+
+此外，初始化过程中还有另一处 `updatePlayerMounted()` 调用点：`OnEnable` 流程（Fuyutsui > core/core.lua > OnEnable）中 `GetCharacterSpecInfo()`（Fuyutsui > main.lua > GetCharacterSpecInfo）在 `updatePlayerBlocks()` 之前执行，而 `GetCharacterSpecInfo()` 内部也调用了 `updatePlayerMounted()`。此时 `state.shapeshiftFormID` 同样尚为 nil（初始 state 仅含 classId/className/classFilename，不含 shapeshiftFormID），同样导致形状变形-坐骑检测比较路径在初始化阶段失效。因此初始化过程中 `updatePlayerMounted()` 共有两处调用且均面临相同的问题。
 
 ## 生命值
 
@@ -109,7 +111,7 @@ local _, _, b = healthPercent:GetRGB()
 self:CreatTexture(blocks.state["生命值"], b)
 ```
 
-`curve100` 把百分比映射到 B 通道，Python 读到的值通常是 1-100 的整数百分比。注意 curve100 在参数 b=100 时 z=0，产生三个控制点 (0,0)、(0,1/255)、(1,100/255)，第二个点覆盖第一个点后等效映射为 B=(1+99*t)/255。50% 血量时 B=50.5/255，Python 读到约 51 而非 50。除 100% 血量外，全范围存在约 +1 的系统偏移。此外 `creatColorCurveScaling` 在 b>100 时还有一个分支（Fuyutsui > main.lua > creatColorCurveScaling），创建仅含两个控制点 (0, (b-100)/255) 和 (1, b/255) 的曲线，产生不同于 b<=100 三控制点曲线的偏移起点。此分支在运行时可通过 updateUnitHealthInfo（Fuyutsui > main.lua > updateUnitHealthInfo 的 100 + inComingHeals - healAbsorb）在 inComingHeals > healAbsorb 时进入，常见于团队治疗场景。`UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 都会触发玩家血量刷新。但 `UNIT_HEAL_PREDICTION` 对队伍成员的行为不对称：当事件 unit 是玩家自身时，调用 `updatePlayerHealth()` 刷新血量像素；当 unit 是队伍成员时（main.lua 中 group[unit] 分支），仅调用 `updateUnitDeathByHealthInfo()` 检测死亡，不调用 `updateUnitHealthInfo()` 刷新血量像素。队伍成员的治疗预估变化不会立即触发血量像素刷新；血量像素更新依赖 OnUpdate 每帧轮转的 `updateGroupInRangeAndHealth` 在下一次轮转至此成员时生效，引入一个取决于队伍大小与轮转位置的延迟——`updateGroupInRangeAndHealth` 每次 OnUpdate 仅更新一名成员（通过 `updateIndex` 轮转），治疗预估变化需等轮转至此成员时才会刷新血量像素。最坏情况下延迟可达 N-1 帧（5 人队伍最多约 4 帧/67ms，30 人团队最多约 29 帧/483ms）。依赖治疗预估事件观察队友血量的 mod 作者需注意此差异。
+`curve100` 把百分比映射到 B 通道，Python 读到的值通常是 1-100 的整数百分比。注意 curve100 在参数 b=100 时 z=0，产生三个控制点 (0,0)、(0,1/255)、(1,100/255)，第二个点覆盖第一个点后等效映射为 B=(1+99*t)/255。50% 血量时 B=50.5/255，Python 读到约 51 而非 50。除 100% 血量外，全范围存在约 +1 的系统偏移。此外 `creatColorCurveScaling` 在 b>100 时还有一个分支（Fuyutsui > main.lua > creatColorCurveScaling），创建仅含两个控制点 (0, (b-100)/255) 和 (1, b/255) 的曲线，产生不同于 b<=100 三控制点曲线的偏移起点。此分支在运行时可通过 updateUnitHealthInfo（Fuyutsui > main.lua > updateUnitHealthInfo 的 100 + inComingHeals - healAbsorb）在 inComingHeals > healAbsorb 时进入，常见于团队治疗场景。`creatColorCurveScaling` 内部通过 `curveCache[b]` 对相同 b 值返回缓存的曲线对象而非新建副本，因此多个队伍成员可能共享同一 `C_CurveUtil.CreateColorCurve` 对象引用。当前 `C_CurveUtil.CreateColorCurve` 对象在创建后不可变，此共享在当前版本中无害，但若未来修改逻辑为在 curve 对象上直接修改控制点，则会出现竞态问题。`UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 都会触发玩家血量刷新。但 `UNIT_HEAL_PREDICTION` 对队伍成员的行为不对称：当事件 unit 是玩家自身时，调用 `updatePlayerHealth()` 刷新血量像素；当 unit 是队伍成员时（main.lua 中 group[unit] 分支），仅调用 `updateUnitDeathByHealthInfo()` 检测死亡，不调用 `updateUnitHealthInfo()` 刷新血量像素。队伍成员的治疗预估变化不会立即触发血量像素刷新；血量像素更新依赖 OnUpdate 每帧轮转的 `updateGroupInRangeAndHealth` 在下一次轮转至此成员时生效，引入一个取决于队伍大小与轮转位置的延迟——`updateGroupInRangeAndHealth` 每次 OnUpdate 仅更新一名成员（通过 `updateIndex` 轮转），治疗预估变化需等轮转至此成员时才会刷新血量像素。最坏情况下延迟可达 N-1 帧（5 人队伍最多约 4 帧/67ms，30 人团队最多约 29 帧/483ms）。依赖治疗预估事件观察队友血量的 mod 作者需注意此差异。
 
 这里读的是百分比，不是当前血量数值，也不是最大血量数值。Python 职业逻辑通常直接比较：
 
@@ -183,7 +185,7 @@ local staggerPercent = damage / maxHealth * 100
 
 `isSec` / `isSecretValue` 是魔兽世界 API，用于判断某值（spellID、targetName、GUID、power 等）是否属于受保护内容。在大秘境、评级 PvP 等受保护场景中，部分 API 返回值会被隐藏，通过 `isSec` 检查可以避免依赖不可靠的数据。
 
-当前源码在 Fuyutsui > core.lua 的模块级作用域调用 SetTestSecret(1)，强制设置 secret*RestrictionsForced 系 CVar 为 1（共六个：secretChallengeModeRestrictionsForced、secretCombatRestrictionsForced、secretEncounterRestrictionsForced、secretMapRestrictionsForced、secretPvPMatchRestrictionsForced、secretAuraDataRestrictionsForced），额外还设置了 scriptErrors 和 doNotFlashLowHealthWarning 两个 CVar。mod 作者在切换调试环境时应注意这两个额外副作用。这使 isSec() 对确实受保护的值类别（spellID、GUID、名字、光环数据等）返回真；但简单类型值如 UnitPower("player") 返回的玩家自身资源整数值不属于受保护类别。若手动执行 SetTestSecret(0)，isSec() 将恢复条件性行为——仅在真正受保护内容（大秘境、评级 PvP）中返回真。同时注意：SetTestSecret(1) 在模块加载时执行（早于 OnEnable），与 OnEnable 中的事件注册无直接时序依赖。这意味着下文描述的所有 isSec 拦截行为（包括 UNIT_SPELLCAST_SUCCEEDED/FAILED/SENT 的跳过及 UNIT_DIED 的保护）在非受保护内容中也始终生效。
+当前源码在 Fuyutsui > core/core.lua 的模块级作用域调用 SetTestSecret(1)，强制设置 secret*RestrictionsForced 系 CVar 为 1（共六个：secretChallengeModeRestrictionsForced、secretCombatRestrictionsForced、secretEncounterRestrictionsForced、secretMapRestrictionsForced、secretPvPMatchRestrictionsForced、secretAuraDataRestrictionsForced），额外还设置了 scriptErrors 和 doNotFlashLowHealthWarning 两个 CVar。mod 作者在切换调试环境时应注意这两个额外副作用。这使 isSec() 对确实受保护的值类别（spellID、GUID、名字、光环数据等）返回真；但简单类型值如 UnitPower("player") 返回的玩家自身资源整数值不属于受保护类别。若手动执行 SetTestSecret(0)，isSec() 将恢复条件性行为——仅在真正受保护内容（大秘境、评级 PvP）中返回真。同时注意：SetTestSecret(1) 在模块加载时执行（早于 OnEnable），与 OnEnable 中的事件注册无直接时序依赖。这意味着下文描述的所有 isSec 拦截行为（包括 UNIT_SPELLCAST_SUCCEEDED/FAILED/SENT 的跳过及 UNIT_DIED 的保护）在非受保护内容中也始终生效。
 
 **注意**：以上关于 isSec(spellID) 对事件参数返回真的描述，基于 SetTestSecret(1) 使 isSec 对 spellID 类受保护值始终返回真的代码行为。但 WoW 事件回调中传递的 spellID 参数（如 UNIT_SPELLCAST_SUCCEEDED/FAILED）是否经过与 API 返回值相同的保护层，未经官方确认，属于推测性描述。若事件参数 spellID 不被 isSec 视为受保护值，则基于此前提的后续推断（包括 ClearAllFuyutsuiBars 死代码结论）将不成立。
 
@@ -198,6 +200,7 @@ local staggerPercent = damage / maxHealth * 100
 | `UNIT_SPELLCAST_SENT` | 事件处理器 | `isSec(targetName)` | 若目标名受保护，阻止设置 `state.castTargetIndex`/`castTargetName`/`castTargetUnit` |
 | `UNIT_DIED` | 事件处理器 | `isSec(unitGUID)` | 若 unitGUID 受保护，跳过 `updateUnitDeath`，不检测该单位死亡 |
 | `SPELL_UPDATE_COOLDOWN` | `updateAuraBySpellCooldown()` 所在的事件处理器 | `isSec(spellID)` | 若 spellID 受保护，跳过 `updateAuraBySpellCooldown`，不通过冷却事件同步光环结束时间与层数 |
+| `SPELL_UPDATE_ICON` | `updateAuraByIcon` 所在的事件处理器 | `isSec(spellID)` | 若 spellID 受保护，跳过 `updateAuraByIcon`，不通过图标变化事件同步光环层数与剩余时间 |
 
 
 > 注意：`Fuyutsui/core/config.lua` 中定义了 `Fuyutsui.noSecretAuras` 表，包含唤魔师、德鲁伊、牧师、武僧、萨满、圣骑士等治疗/辅助专精的 30 余个光环法术 ID，语义上标记这些光环不应受 isSec 保护层影响。但全代码库搜索确认没有任何运行时代码（`main.lua`、`auras.lua`、`core.lua`、`class/*.lua`）读取或引用该表。这是一个已定义但完全不被消费的死代码结构。浏览 `config.lua` 的 mod 作者可能误认为存在针对这些光环的 isSec 豁免机制，但实际上该表无任何运行时效果。上表中描述的所有豁免行为均基于 WoW 内置的 `issecretvalue()` 全局函数，与此表无关。
@@ -209,6 +212,7 @@ local staggerPercent = damage / maxHealth * 100
 - `updateAuraBySuccess` 被跳过 -> 成功施法无法触发光环更新。
 - `updateSpellFailed` 被跳过 -> 法术失败像素不会写入，`法术失败` 字段停留在旧值或 0。
 - `castTargetIndex`/`castTargetName`/`castTargetUnit` 不被设置 -> 施法目标追踪在大秘境中不可用。
+- `updateAuraByIcon` 被跳过 -> icon-driven 的光环更新在受保护场景中不可用。
 
 ## 移动和移动速度
 
@@ -255,7 +259,7 @@ self:updatePlayerValid()
 | `HealthPotionCount`、`ManaPotionCount`、`HealthstoneCount`、`RecklessnessCount`、`LightsPotentialCount` | `C_Item.GetItemCount()` | 不直接输出数量；只影响对应物品冷却字段是否写 255 |
 | `DefensiveAuraInstanceID` | `UNIT_AURA` 中的 `HELPFUL|BIG_DEFENSIVE` 光环 | 不输出 auraInstanceID；只在有 `防御光环` block 时输出剩余时间 |
 
-另外注意物品计数刷新存在两个问题：一是 `ITEM_COUNT_CHANGED` 在 Fuyutsui > core.lua > OnEnable 中未注册（尽管 Fuyutsui > main.lua 已定义处理函数），`BAG_UPDATE` 同样未在 OnEnable 中注册，结合两者缺失，确认物品数量变更完全无法通过任何事件驱动刷新。二是 `updateItemCoolDown()` 中 `GetItemCount()` 一次性设置全部 5 个计数（HealthPotionCount/ManaPotionCount/HealthstoneCount/RecklessnessCount/LightsPotentialCount），任一计数为 nil 时触发，此后所有计数仅初始化一次。每个物品仅当对应计数为 nil 时才调用 `GetItemCount()`（如 `if not self.state.HealthPotionCount then self:GetItemCount() end`），一旦计数设为非 nil 就永久跳过刷新。两者叠加导致所有 5 个计数在初始化后全部冻结，影响范围远大于文档之前仅聚焦的 HealthPotionCount。
+另外注意物品计数刷新存在两个问题：一是 `ITEM_COUNT_CHANGED` 在 Fuyutsui > core/core.lua > OnEnable 中未注册（尽管 Fuyutsui > main.lua 已定义处理函数），`BAG_UPDATE` 同样未在 OnEnable 中注册，结合两者缺失，确认物品数量变更完全无法通过任何事件驱动刷新。二是 `updateItemCoolDown()` 中 `GetItemCount()` 一次性设置全部 5 个计数（HealthPotionCount/ManaPotionCount/HealthstoneCount/RecklessnessCount/LightsPotentialCount），任一计数为 nil 时触发，此后所有计数仅初始化一次。每个物品仅当对应计数为 nil 时才调用 `GetItemCount()`（如 `if not self.state.HealthPotionCount then self:GetItemCount() end`），一旦计数设为非 nil 就永久跳过刷新。两者叠加导致所有 5 个计数在初始化后全部冻结，影响范围远大于文档之前仅聚焦的 HealthPotionCount。
 
 此外 `SPELL_UPDATE_USES` 和 `SPELL_UPDATE_CHARGES` 均已在 core.lua 注册，但它们的 addon 级处理函数是空的（仅占位），实际功能由 Fuyutsui > core/block.lua 中 countBars 框架帧独立处理。此注册是冗余的。`ENCOUNTER_TIMELINE_EVENT_ADDED`、`ENCOUNTER_TIMELINE_EVENT_REMOVED` 和 `ENCOUNTER_TIMELINE_EVENT_STATE_CHANGED` 同样在 core.lua 的 OnEnable 中注册，但在 main.lua 中仅有空函数体（无实际操作），属于同一冗余注册模式。`SPELL_RANGE_CHECK_UPDATE` 和 `ACTION_RANGE_CHECK_UPDATE` 也属于同一模式——在 core.lua 的 OnEnable 中注册，main.lua 中处理函数仅包含注释掉的 `updateNameplateCount()` 调用，从未执行实际功能。
 
@@ -349,13 +353,13 @@ Python 读到的是 `maxRange` 的整数近似值，不是精确坐标距离。
 
 注意 `testMap` 和 `testEncounter` 是硬编码在 Fuyutsui > main.lua > testMap/testEncounter 的 local 变量（非全局可配置表），第三方 mod 无法通过配置新增豁免条目。变量名以 `test` 为前缀暗示其调试/测试用途，不构成通用扩展机制。
 
-另外初始 `state` 对象（Fuyutsui > core.lua 初始 state）中无 `mapID` 和 `encounterID` 字段。`state.mapID` 在首次 `ZONE_CHANGED`/`ZONE_CHANGED_INDOORS`/`PLAYER_ENTERING_WORLD` 前为 nil（Fuyutsui > main.lua > ZONE_CHANGED/ZONE_CHANGED_INDOORS/PLAYER_ENTERING_WORLD 事件处理器），`state.encounterID` 在首次 `ENCOUNTER_START` 前为 nil。Fuyutsui > main.lua > testMap 的 nil 安全短络检查（`state.mapID and testMap[state.mapID]`）在 nil 时短路返回假，因此从游戏启动到首次进入有效区域/首领战之前，`testMap`/`testEncounter` 的放宽战斗条件豁免不生效。
+另外初始 `state` 对象（Fuyutsui > core/core.lua 初始 state）中无 `mapID` 和 `encounterID` 字段。`state.mapID` 在首次 `ZONE_CHANGED`/`ZONE_CHANGED_INDOORS`/`PLAYER_ENTERING_WORLD` 前为 nil（Fuyutsui > main.lua > ZONE_CHANGED/ZONE_CHANGED_INDOORS/PLAYER_ENTERING_WORLD 事件处理器），`state.encounterID` 在首次 `ENCOUNTER_START` 前为 nil。Fuyutsui > main.lua > testMap 的 nil 安全短络检查（`state.mapID and testMap[state.mapID]`）在 nil 时短路返回假，因此从游戏启动到首次进入有效区域/首领战之前，`testMap`/`testEncounter` 的放宽战斗条件豁免不生效。
 
 ## 队伍状态
 
 `队伍类型` 和 `队伍人数` 是顶层字段。治疗逻辑还会读取 `state_dict["group"]` 子字典。
 
-注意 `GROUP_ROSTER_UPDATE` 事件处理函数内置了 `C_Timer.NewTimer(1, function()...)` 实现的 1 秒防抖延迟：每次触发会取消前一个计时器再重新创建。队伍变更后至少需 1 秒才能反映到 `state_dict` 中。
+注意 `GROUP_ROSTER_UPDATE` 事件处理函数内置了 `C_Timer.NewTimer(1, function()...)` 实现的 1 秒防抖延迟：每次触发会取消前一个计时器再重新创建。队伍变更后至少需 1 秒才能反映到 `state_dict` 中。但 `state.castTargetName` 和 `state.castTargetUnit` 在该事件处理器入口处被无条件立即清空（早于计时器取消与重建）。队伍变更后施法目标引用立即失效，而非 1 秒后。依赖施法目标追踪的 mod 作者在分析目标追踪可靠性时需考虑此立即清除行为。
 
 Lua 端 `updateGroup()` 会遍历队伍成员，记录：
 
@@ -370,6 +374,8 @@ Lua 端 `updateGroup()` 会遍历队伍成员，记录：
 - `inSight`
 - 血量曲线相关字段
 - 队伍光环表
+
+> **队伍光环表填充机制**：队伍光环表由 `updateUnitFullAura(unit)` 函数（Fuyutsui > main.lua > updateUnitFullAura）填充。该函数内部以 `for i = 1, 5` 循环调用 `C_UnitAuras.GetBuffDataByIndex(unit, i, 'PLAYER|HELPFUL|RAID_IN_COMBAT')`，因此每个队伍成员最多有 5 个由玩家自身施放的战斗增益被追踪。此约束直接影响队伍光环数据的完整性预期：若队友身上有超过 5 个符合条件的玩家战斗增益，超出部分不会被记录。编写治疗/驱散逻辑的 mod 作者应意识到此限制。`PLAYER` 过滤器前缀的含义是仅追踪由玩家自身施放的光环，而非队友身上的所有光环——这意味着无法通过队伍光环表获取由其他队友施放的增益。
 
 写入像素时，每个队友占一段连续 block。Python 端按 `config.yml` 的 `group.start` 和 `group.num` 解析成：
 
@@ -405,7 +411,7 @@ state_dict["group"]["1"]["驱散"]
 
 注意 `updateIndex` 轮转存在一个在正常游戏流程中可触发的停滞风险：当队伍/团队人数减少时（如队员退队/下线），`updateGroup()` 重建 `groupList` 但不重置 `updateIndex`。若 `updateIndex` 超出新的 `numUnits` 范围，`groupList[updateIndex]` 为 nil 触发 Fuyutsui > main.lua > updateGroupInRangeAndHealth 的早期 return（跳过 updateIndex 自增），导致该索引永久停滞，后续成员无法更新。需要留意的是，`updateGroupInRangeAndHealth` 属于 OnUpdate 高频逻辑段（每帧执行，约 60 次/秒），索引一旦停滞意味着每秒约 60 次早期 return 的无意义调用，而非读者从 0.2 秒 timer 段自然推想的约 5 次/秒。
 
-注意 `IterateGroupMembers`（Fuyutsui > core.lua > IterateGroupMembers）在队伍与团队模式下对玩家自身的包含规则不同：队伍模式下迭代器以 i=0 开始并返回 'player'；团队模式下 i=1 开始，不返回 'player'。因此玩家自身的 group 条目（含 specRole 覆盖的职责，Fuyutsui > main.lua > updateGroup specRole 覆盖）仅在队伍模式下写入。mod 作者从 `state_dict["group"]` 读取玩家自身数据时应注意此模式差异。
+注意 `IterateGroupMembers`（Fuyutsui > core/core.lua > IterateGroupMembers）在队伍与团队模式下对玩家自身的包含规则不同：队伍模式下迭代器以 i=0 开始并返回 'player'；团队模式下 i=1 开始，不返回 'player'。因此玩家自身的 group 条目（含 specRole 覆盖的职责，Fuyutsui > main.lua > updateGroup specRole 覆盖）仅在队伍模式下写入。mod 作者从 `state_dict["group"]` 读取玩家自身数据时应注意此模式差异。
 
 队伍成员血量使用 `UnitHealthPercent(unit, false, obj.curve)`，并叠加 `inComingHeals` 和 `healAbsorb` 影响曲线。也就是说治疗逻辑读到的队友血量不是简单生命百分比，而是已经考虑了部分预估治疗和吸收修正后的显示值。
 
@@ -428,13 +434,17 @@ state_dict["group"]["1"]["驱散"]
 
 当前源码还有一个配置细节：`loadPlayerBlocks()` 只读取 group 配置里的 `auras` 字段，但 `class/Evoker.lua` 的增辉队伍配置写成了 `aura = { ... }` 单数。按当前代码，这个 `先知先觉` 队伍光环不会被加载到 `blocks.groups.auras`，即使 Python `config.yml` 里有对应 `group` 字段，也会一直读不到有效剩余时间。
 
-除 `aura`/`auras` 字段名不匹配外，`Evoker.lua` 中 group 的 `num = 5` 与 `config.yml` 中 `num: 4` 也不一致。这意味着即使修正字段名，Lua 每名队员占据 5 个像素步长、Python 按 4 个步长解析，从第 2 个队员开始所有字段（`生命值`、`职责`、`驱散`、`先知先觉`）的像素偏移都会错位 1 个位置，队伍数据完全错乱。详见 `队友状态/readme.md`。
+除 `aura`/`auras` 字段名不匹配外，`Evoker.lua` 中 group 的 `num = 5` 与 `config.yml` 中 `num: 4` 也不一致。这意味着即使修正字段名，Lua 每名队员占据 5 个像素步长、Python 按 4 个步长解析，从第 2 个队员开始所有字段（`生命值`、`职责`、`驱散`、`先知先觉`）的像素偏移都会错位 1 个位置，队伍数据完全错乱。
 
 除 `auras` 外，`rejuv` 是 `loadPlayerBlocks()` 中与 `auras` 并列的 group 可选配置维度（Fuyutsui > main.lua > loadPlayerBlocks rejuv 配置），用于 Druid 专精回春术计数。当 `config.yml` 中 group 子字典包含 `rejuv` 字段时，`OnUpdateUnitAura`（Fuyutsui > main.lua > OnUpdateUnitAura rejuv 计数）将回春术（spellId 774/155777）的计数写入 `blocks.groups.rejuv` 对应的像素步长，与 `auras` 光环系统独立运作。
 
 另一个配置问题是 `config.yml` 中战士武器专精（专精 1）的 `顺劈斩高亮` 和 `致死高亮` 都配置为 `step: 25`（对应同一像素位置）。Python `build_state_dict` 按字段名分别读入状态字典，但两个字段读取相同的像素值，且 Lua 端只能往一个 step 写一个值，导致其中一个字段始终读到错误值。第三方作者应避免为不同字段配置相同 step。
 
 类似的冲突也出现在死亡骑士鲜血专精（专精 3）中：`脓疮毒镰2` 和 `枯萎凋零` 均配置为 `step: 48`，Python 的 `build_state_dict` 对两者均从同一像素位置 `row_data[48]` 读取值，该位置对应 Lua index 48（`脓疮毒镰2` 的光环剩余时间）。因此 `枯萎凋零` 字段在 `state_dict` 中实际包含的是 `脓疮毒镰2` 的数值，而非 `枯萎凋零` 自身的剩余时间。配置缺少 step 49 映射意味着 Lua 对 index 49 写入的 `枯萎凋零` 真实值不会被任何 Python 字段读取。此问题不限于战士，在死亡骑士等其他职业配置中同样存在。
+
+> **补充说明**：枯萎凋零同时出现在两条数据通道中——作为 aura 由 Lua index 49 写入但无对应 step 映射，作为 spell 由 Lua index 71（冷却）和 index 72（充能）写入并对应 config.yml 中 spells 子字典的凋零冷却和凋零充能配置。模组开发者在处理枯萎凋零相关逻辑时，需注意此跨通道双重身份，并在属于 blocks.spells 范畴的完整冷却/充能语义上参考 `技能冷却/readme.md`。
+
+此外，`clearGroupBlocks()` 函数（Fuyutsui > main.lua > clearGroupBlocks）已定义但全代码库中无任何调用点，属于死代码。该函数遍历 `blocks.groups.start` 至 255 调用 `CreatTexture` 清空队伍块纹理，但从未被 `GROUP_ROSTER_UPDATE`、`updateGroup`、`OnEnable` 或其他任何事件处理函数调用。浏览 `main.lua` 的 mod 作者不应假设存在一个主动的队伍块清理机制。
 
 ## 职业专精额外 block 字段
 
@@ -514,7 +524,7 @@ end
 
 这类字段的详细冷却语义已经在 `技能冷却/readme.md` 中展开。
 
-另外注意 `updateItemCoolDown()` 中使用 `math.min(1, remainingTime / 255)` 写入冷却值及 else 分支直接写 1，实际存在至少四条路径产生 value=1：(a) 冷却剩余时间恰好接近或超过 255 秒时钳制为 1，(b) 刚进入冷却且物品冷却时间本身接近 255 秒（remainingTime 约 255），(c) 物品完全未处于冷却（enableCooldownTimer=false，GetItemRemainingTime 返回 255，经 math.min(1, 255/255)=1 在 if 分支写入），(d) 物品数量为零或不可用（else 分支直接写 1）。Python 端读到 value=1 无法唯一区分无冷却、长冷却、物品不可用三种语义。
+另外注意 `updateItemCoolDown()` 中使用 `math.min(1, remainingTime / 255)` 写入冷却值及 else 分支直接写 1，实际存在至少四条路径使 math.min 结果为 1：(a) 冷却剩余时间恰好接近或超过 255 秒时钳制为 1，(b) 刚进入冷却且物品冷却时间本身接近 255 秒（remainingTime 约 255），(c) 物品完全未处于冷却（enableCooldownTimer=false，GetItemRemainingTime 返回 255，经 math.min(1, 255/255)=1 在 if 分支写入），(d) 物品数量为零或不可用（else 分支直接写 1）。此处 `CreatTexture` 将 math.min 的浮点结果直接传入 `SetColorTexture(0, i/255, b, 1)` 的 B 通道（不再次除以 255，与总体链路中 Lua 写 `1/255`、Python 读 `1` 的编码约定不同），因此当 b=1.0 时 Python 从原始 BGRA 字节读到 255。Python 端读到 B=255 无法唯一区分无冷却、长冷却、物品不可用三种语义。
 
 ## 防御光环是特殊例外
 
@@ -699,3 +709,14 @@ countBars 的 StatusBar 在 Fuyutsui > core/block.lua 注册了三个事件（`S
 | 2026-05-30 | Iota | 受保护值(isSec)对事件链的影响 — 汇总表 SPELL_UPDATE_COOLDOWN 行 | Theta 终审修正 | 修正函数列为 `updateAuraBySpellCooldown()` 所在的事件处理器，移除与 `updateDrinkStatus` 的错误关联 |
 | 2026-05-30 | Iota | 受保护值(isSec)对事件链的影响 — 汇总表后 | Theta 终审修正 | 新增注释说明 `Fuyutsui.noSecretAuras` 表已定义但无运行时代码消费，isSec 拦截完全由 WoW 内置 `issecretvalue()` 驱动 |
 | 2026-05-30 | Iota | 全文 | Theta 审查建议 | 在文档开头添加目录说明，指出本文档保存于 `队友状态/` 目录但内容为「玩家状态」，原队友状态内容已整合进队伍状态章节 |
+| 2026-05-30 | Iota | 全文 | Theta 最终审校 | 将全部 5 处 `Fuyutsui > core.lua` 替换为 `Fuyutsui > core/core.lua`，与文档自身对其他 core/ 子目录文件的引用约定保持一致 |
+| 2026-05-30 | Iota | 队伍状态 | Theta 最终审校 | 新增队伍光环表填充机制说明：由 updateUnitFullAura(unit) 以 for i=1,5 循环填充，最多 5 个玩家战斗增益，PLAYER 过滤器含义 |
+| 2026-05-30 | Iota | 有效性如何计算 | Theta 最终审校 | 补充 GetCharacterSpecInfo() 内第二处 updatePlayerMounted() 调用点，说明初始化中共两处调用且均面临 shapeshiftFormID 尚为 nil 的问题 |
+| 2026-05-30 | Iota | 队伍状态 — 死亡骑士 step 48 冲突 | Theta 最终审校 | 补充枯萎凋零跨通道双重身份说明：aura（index 49）无 step 映射，spell 冷却（index 71）和充能（index 72）有 step 映射 |
+| 2026-05-30 | Iota | 受保护值(isSec)对事件链的影响 — isSec 拦截汇总表 | Theta 审核建议 | 新增 SPELL_UPDATE_ICON 行，说明 isSec(spellID) 跳过 updateAuraByIcon |
+| 2026-05-30 | Iota | 受保护值(isSec)对事件链的影响 — 大秘境影响段落 | Theta 审核建议 | 补充 updateAuraByIcon 被跳过的对应影响：icon-driven 光环更新在受保护场景中不可用 |
+| 2026-05-30 | Iota | 队伍状态 — GROUP_ROSTER_UPDATE | Theta 审核建议 | 补充 state.castTargetName/state.castTargetUnit 在事件处理器入口处无条件立即清空 |
+| 2026-05-30 | Iota | 生命值 — creatColorCurveScaling | Theta 审核建议 | 补充 curveCache 缓存机制：相同 b 值返回缓存曲线对象引用，非新建副本 |
+| 2026-05-30 | Iota | 队伍状态 — Evoker.lua num 不匹配 | Theta 审核建议 | 删除指向文件自身的循环引用「详见 队友状态/readme.md」 |
+| 2026-05-30 | Iota | 队伍状态 | Theta 审核建议 | 补充 clearGroupBlocks() 函数已定义但无调用点的死代码说明 |
+| 2026-05-30 | Iota | 物品状态为什么也算 block | Theta 最终审校 | 将「value=1」修正为「B=255」：实际存在至少四条路径使 math.min 结果为 1（Lua 侧浮点值），Python 原始 BGRA 字节读到 B=255；补充数据链路说明（CreatTexture 直接将 math.min 浮点结果传入 SetColorTexture B 通道，不再次除以 255） |
