@@ -278,6 +278,8 @@ end
 
 此外，当 `updateGroup()` 被触发（初始化、切专精、队伍列表变化、`updatePlayerBlocks` 调用）时，在创建 `group[unit]` 条目后立即调用 `updateUnitFullAura(unit)`（`Fuyutsui/main.lua > Fuyutsui > updateGroup`），首次扫描该单位上玩家自身的前 5 个 `PLAYER|HELPFUL|RAID_IN_COMBAT` 光环写入 `obj.aura` 缓存。因此新成员的 aura 数据在加入 group 的同一帧即可用，无需等待后续的 `OnUpdateUnitAura()` 周期轮询或 `UNIT_AURA` 事件驱动更新。这一初始化填充行为与后续的 `UNIT_AURA` 增量维护（`addedAuras`/`updatedAuraInstanceIDs`/`removedAuraInstanceIDs` 分支）共同构成完整的光环生命周期。
 
+除此之外，`UNIT_AURA` 事件处理函数（`Fuyutsui/main.lua > Fuyutsui > UNIT_AURA`）中还存在另一条全量更新路径——当 `info.isFullUpdate` 为 true 时，直接调用 `updateUnitFullAura(unit)` 并提前 `return`，绕过所有增量分支（`addedAuras`/`updatedAuraInstanceIDs`/`removedAuraInstanceIDs`）。此路径在游戏运行中因暴雪内部原因异步触发，与 `updateGroup()` 初始化的全量填充是两条独立的异步触发器。mod 作者应知晓游戏过程中 `obj.aura` 缓存可能因 `UNIT_AURA` 的 `isFullUpdate` 路径而被重新扫描覆盖，且此路径的缓存行为与初始化填充的清理语义不同——初始化路径创建新 `obj.aura = {}` 后再填充，不存在缓存残留问题；而 `isFullUpdate` 路径作用于已有缓存的 `obj.aura` 对象，前 5 个以外且没有被 `removedAuraInstanceIDs` 移除的旧条目会残留。
+
 然后 `OnUpdateUnitAura()` 每 0.2 秒按 `blocks.groups.auras` 输出配置过的光环槽：
 
 - 一个槽可以配置多个 spellId。
@@ -293,7 +295,7 @@ end
 
 这些字段在 Python 中直接表现为 `state_dict["group"][slot]["光环名"]` 的整数值。职业逻辑通常只判断是否为 0，或者选择没有某个光环的单位。
 
-全量光环更新只把前 5 个 `PLAYER|HELPFUL|RAID_IN_COMBAT` Buff 写入 `obj.aura`，不会先清空旧缓存。Blizzard 的 GetBuffDataByIndex 按优先级、剩余时间等内部规则排序，不是简单的原始施放顺序。如果玩家在目标身上有超过 5 个可控的 HELPFUL Buff，仅前 5 个会被缓存到 obj.aura 中，后续的光环输出可能不完整。如果旧 aura 没有通过 `removedAuraInstanceIDs` 删除，缓存里可能暂时保留过期的 `auraInstanceID`。需特别注意一种边界情况：同一法术光环被移除后重新施加时，旧 auraInstanceID（来自移除前）可能未出现在 removedAuraInstanceIDs 中而继续留在 obj.aura 中。getMaxAuraByTable 遍历 obj.aura 时，若新旧两个条目具有相同的 spellId，它将按 expirationTime 取最大值。旧条目的 expirationTime 是原施放时的剩余时间，若该法术原施放时续较长（如 30 秒）但在几秒后被移除，则旧条目的 expirationTime 可能大于新施加条目的 expirationTime，导致 getMaxAuraByTable 选中已过期的旧条目。此时 C_UnitAuras.GetAuraDuration(unit, oldAuraInstanceID) 因旧实例已过期而返回 nil，最终该光环槽输出 0 而非正确值。另外，`OnUpdateUnitAura()` 一开始要求 `blocks.groups.auras` 存在；因此只配置 `rejuv`、不配置 `auras` 的 group 块不会输出回春数量。这是一个结构性问题，不是简单的功能不可用——如果只配置 rejuv 而不配置 auras，OnUpdateUnitAura()（`main.lua > Fuyutsui > OnUpdateUnitAura`）在入口处检查 blocks.groups.auras 为 nil 后直接 return，整个函数静默退出，rejuv 分支（`main.lua > Fuyutsui > OnUpdateUnitAura > rejuv`）永远不可达。
+`UNIT_AURA` 的 `isFullUpdate` 全量更新路径（`Fuyutsui/main.lua > Fuyutsui > UNIT_AURA > updateUnitFullAura`）只把前 5 个 `PLAYER|HELPFUL|RAID_IN_COMBAT` Buff 写入 `obj.aura`，不会先清空旧缓存。这与 `updateGroup()` 初始化路径（创建新 `obj.aura = {}` 空表后再调用 `updateUnitFullAura()`）的清理语义不同——后者因新建空表不存在残留问题，而 `isFullUpdate` 路径作用于已有缓存的 `obj.aura` 对象。Blizzard 的 GetBuffDataByIndex 按优先级、剩余时间等内部规则排序，不是简单的原始施放顺序。如果玩家在目标身上有超过 5 个可控的 HELPFUL Buff，仅前 5 个会被缓存到 obj.aura 中，后续的光环输出可能不完整。如果旧 aura 没有通过 `removedAuraInstanceIDs` 删除，缓存里可能暂时保留过期的 `auraInstanceID`。需特别注意一种边界情况：同一法术光环被移除后重新施加时，旧 auraInstanceID（来自移除前）可能未出现在 removedAuraInstanceIDs 中而继续留在 obj.aura 中。getMaxAuraByTable 遍历 obj.aura 时，若新旧两个条目具有相同的 spellId，它将按 expirationTime 取最大值。旧条目的 expirationTime 是原施放时的绝对过期时间戳（基于 `GetTime()`，0 表示永久光环），而非剩余持续时长，若该法术原施放时续较长（如 30 秒）但在几秒后被移除，则旧条目的 expirationTime 可能大于新施加条目的 expirationTime，导致 getMaxAuraByTable 选中已过期的旧条目。此时 C_UnitAuras.GetAuraDuration(unit, oldAuraInstanceID) 因旧实例已过期而返回 nil，最终该光环槽输出 0 而非正确值。另外，`OnUpdateUnitAura()` 一开始要求 `blocks.groups.auras` 存在；因此只配置 `rejuv`、不配置 `auras` 的 group 块不会输出回春数量。这是一个结构性问题，不是简单的功能不可用——如果只配置 rejuv 而不配置 auras，OnUpdateUnitAura()（`main.lua > Fuyutsui > OnUpdateUnitAura`）在入口处检查 blocks.groups.auras 为 nil 后直接 return，整个函数静默退出，rejuv 分支（`main.lua > Fuyutsui > OnUpdateUnitAura > rejuv`）永远不可达。
 
 ### 当前配置的队友光环
 
@@ -462,16 +464,16 @@ Python 解码后的结构大致如下：
 
 | 函数 | 用途 |
 |---|---|
-| `get_lowest_health_unit()` | 找血量最低且职责不为 0 的单位 |
-| `get_count_units_below_health()` / `count_units_below_health()` | 统计低血量单位数量 |
+| `get_lowest_health_unit()` | 找血量最低且职责不为 0 的单位；可选参数 `health_threshold`（默认 100），只考虑生命值低于该阈值的单位（默认排除满血目标） |
+| `get_count_units_below_health()` / `count_units_below_health()` | 统计低血量单位数量；`get_count_units_below_health(health_threshold=100)` 中参数可选（默认 100），`count_units_below_health(health_threshold)` 中参数必填 |
 | `get_unit_with_role()` | 找指定职责的单位；支持 `reverse` 参数控制正序/逆序查找（默认 `reverse=False` 返回正序第一个匹配单位，`reverse=True` 返回逆序最后一个匹配单位） |
 | `get_unit_with_role_and_without_aura_name()` | 找指定职责且缺少某光环的单位；支持 `reverse` 参数控制正序/逆序查找（默认 `reverse=False` 返回正序第一个匹配单位，`reverse=True` 返回逆序最后一个匹配单位） |
-| `get_lowest_health_unit_without_aura()` | 找缺少某光环且血量最低的单位 |
-| `get_lowest_health_unit_with_aura()` | 找有某光环且血量最低的单位 |
+| `get_lowest_health_unit_without_aura()` | 找缺少某光环且血量最低的单位；可选参数 `health_threshold`（默认 100），只考虑生命值低于该阈值的单位 |
+| `get_lowest_health_unit_with_aura()` | 找有某光环且血量最低的单位；可选参数 `health_threshold`（默认 100），只考虑生命值低于该阈值的单位 |
 | `get_lowest_health_unit_with_any_aura()` | 找拥有**任意一个**指定光环且血量最低的单位；支持可变参数 `*aura_names`，可传入多个光环名（如 `get_lowest_health_unit_with_any_aura(state_dict, '回春术', '愈合', '生命绽放')`），内部通过 `_has_any_aura()` 逐光环检查，任一匹配即视为有效。与 `get_lowest_health_unit_with_aura()`（仅接受单个光环名参数）不同。另支持可选关键字参数 `health_threshold`（默认 100），只考虑生命值低于该阈值的单位（默认排除满血目标）。调用方可覆盖此参数进一步限制候选范围（如 `health_threshold=90` 仅考虑血量 90% 以下的单位）。此参数为 Python 端工具函数的过滤行为，与 Lua 像素编码无关。 |
-| `get_lowest_health_unit_with_aura_count()` | 找某光环数值等于指定值的最低血单位 |
+| `get_lowest_health_unit_with_aura_count()` | 找某光环数值等于指定值的最低血单位；可选参数 `health_threshold`（默认 100），只考虑生命值低于该阈值的单位 |
 | `get_unit_with_aura()` | 找拥有指定光环且持续时间最高的单位 |
-| `count_units_without_aura_below_health()` | 统计缺少某光环且低血的单位 |
+| `count_units_without_aura_below_health(health_threshold)` | 统计缺少某光环且低血的单位；参数 `health_threshold` 为必填 |
 | `count_units_with_aura()` | 统计有某光环的单位 |
 | `get_unit_with_dispel_type()` | 找第一个指定驱散类型的单位 |
 
@@ -508,7 +510,7 @@ Python `config.yml` 中实际配置了这些 group 字段：
 4. groupList 因持续增长不会缩小，导致 Python 解码的 30 个槽位被过期数据填充。
 
 第三方作者排查队友槽位异常时，必须意识到上述"双表分裂"问题，不能假设非当前队友槽位为 0；Python 固定解析 30 个槽位，逻辑侧依赖 `职责 == 0` 过滤无效单位时要特别小心。如果未来主动调用 clearGroupBlocks()，它从 blocks.groups.start 一直清零到 255（main.lua:1296），会覆盖同一像素区间内 spells、auras 等其他模块写入的像素。
-- 全量光环更新只扫描前 5 个 `PLAYER|HELPFUL|RAID_IN_COMBAT` Buff，且不会清空旧缓存；增量更新依赖 `UNIT_AURA` 的 added/updated/removed 列表。
+- `UNIT_AURA` 的 `isFullUpdate` 路径（`Fuyutsui/main.lua > Fuyutsui > UNIT_AURA`）会全量扫描前 5 个 `PLAYER|HELPFUL|RAID_IN_COMBAT` Buff 并覆盖写入 `obj.aura`，不会先清空旧缓存；增量更新依赖 `UNIT_AURA` 的 added/updated/removed 列表。与之对应的 `updateGroup()` 初始化路径（`Fuyutsui/main.lua > Fuyutsui > updateGroup > updateUnitFullAura`）因新建 `obj.aura = {}` 空表后再填充，不存在缓存残留问题。mod 作者应区分这两个触发路径的不同清理语义。
 - 队友姓名只用于把 `UNIT_SPELLCAST_SENT` 的 `targetName` 映射回 group 槽位，不会传给 Python。
 - 队友 GUID 只用于 `UNIT_DIED` 匹配死亡，GUID 通过 isSec() 过滤后（main.lua:1656-1659）才用于 UNIT_DIED 匹配死亡，不会传给 Python。
 - `canAttack` 被保存进 group 对象，但当前队友输出链路没有使用它。
@@ -562,3 +564,8 @@ Python `config.yml` 中实际配置了这些 group 字段：
 | 2026-05-30 | 总体链路（Step 3 — GROUP_ROSTER_UPDATE 处理说明） | Theta 审核：文档称「仅」在 UNIT_SPELLCAST_STOP 中置 0，遗漏 CHANNEL_STOP 也会清除 | 将「仅在 UNIT_SPELLCAST_STOP 中置 0」改为「在 UNIT_SPELLCAST_STOP 和 CHANNEL_STOP 中均置 0」 |
 | 2026-05-30 | 队友增益 | Theta 审核：缺失 updateGroup 创建 group[unit] 后立即调用 updateUnitFullAura 填充 aura 缓存的说明 | 补充 updateGroup 初始化时调用 updateUnitFullAura 立即填充新成员 aura 缓存的段落 |
 | 2026-05-30 | 总体链路（Step 3 — updateGroupCount 说明） | Theta 审核：缺少单人模式下队伍人数像素槽与未写入状态不可区分的警告 | 补充队伍人数在单人模式返回 0 与默认值不可区分的限制说明 |
+| 2026-05-30 | 队友增益（同一法术重施加边界情况） | Theta 审核：expirationTime 误描述为「剩余时间」而非绝对时间戳 | 修正为「绝对过期时间戳（基于 GetTime()，0 表示永久光环），而非剩余持续时长」|
+| 2026-05-30 | 队友增益（updateGroup 初始化调用 updateUnitFullAura 说明后） | Theta 审核：遗漏 UNIT_AURA isFullUpdate 全量更新路径 | 新增独立段落说明 isFullUpdate 路径与 updateGroup() 初始化路径为两条独立的异步触发器，并区分清理语义 |
+| 2026-05-30 | 队友增益（全量光环更新不清缓存段落）及 需要注意的细节 | Theta 审核：未区分 updateGroup() 初始化路径和 UNIT_AURA isFullUpdate 路径的清理语义差异 | 将"全量光环更新"段落开头明确指向 UNIT_AURA isFullUpdate 并对比 updateGroup() 初始化路径的 obj.aura = {} 行为；对应更新"需要注意的细节"条目的表述 |
+| 2026-05-30 | Python 如何使用队友信息（函数表） | Theta 审核：get_lowest_health_unit/get_count_units_below_health/count_units_below_health/get_lowest_health_unit_without_aura/get_lowest_health_unit_with_aura/get_lowest_health_unit_with_aura_count 均支持 health_threshold 参数但未说明 | 为上述六个函数补充 health_threshold 参数说明 |
+| 2026-05-30 | Python 如何使用队友信息（函数表） | Theta 审核：get_count_units_below_health() 和 count_units_below_health() 的 health_threshold 签名不同，count_units_without_aura_below_health() 的 health_threshold 为必填 | 在合并条目中标注参数签名差异；count_units_without_aura_below_health 标注为必填参数 |
