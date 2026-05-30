@@ -133,7 +133,7 @@ local i = reversed and numGroupMembers or (unit == 'party' and 0 or 1)
 | `inSightTimer` | 视野恢复定时器 | 否，仅 Lua 内部使用 |
 | `curveTimer` | 治疗吸收恢复定时器 | 否，仅 Lua 内部使用 |
 
-注意：`obj.role` 仅在 `updateGroup()` 执行时赋值（main.lua:1308-1311）。`updateGroup()` 的触发路径包括初始化、`PLAYER_TALENT_UPDATE`（切专精）、`GROUP_ROSTER_UPDATE`（队伍变化，带 1 秒防抖）和 `updatePlayerBlocks()`。`obj.role` **不随** 每帧的 `updateGroupInRangeAndHealth()` 刷新（main.lua:1126 读取 obj.role 但不重新调用 `UnitGroupRolesAssigned`）。因此，战斗中通过团队面板修改某个玩家的职责后，Python 端 `state_dict["group"][slot]["职责"]` 的值不会立即更新，需等待下一次 `updateGroup()` 触发才能反映变更。
+注意：`obj.role` 仅在 `updateGroup()` 执行时赋值（main.lua:1308-1311）。`updateGroup()` 的触发路径包括初始化、`PLAYER_TALENT_UPDATE`（切专精）、`GROUP_ROSTER_UPDATE`（队伍变化，带 1 秒防抖）和 `updatePlayerBlocks()`。`obj.role` **不随** 每帧的 `updateGroupInRangeAndHealth()` 刷新（main.lua:1126 读取 obj.role 但不重新调用 `UnitGroupRolesAssigned`）。因此，战斗中通过团队面板修改某个玩家的职责后，Python 端 `state_dict["group"][slot]["职责"]` 的值不会立即更新，需等待下一次 `updateGroup()` 触发才能反映变更。与 `role` 不同，`canAssist` 在 `updateGroupInRangeAndHealth()` 中每帧重新赋值（`obj.canAssist = UnitCanAssist("player", unit)`），且该值在同一帧立即参与 `obj.valid` 计算。因此 `canAssist` 会随每帧轮询自动更新，无需等待 `updateGroup()` 触发。mod 作者不应假设 `canAssist` 仅由 `updateGroup()` 在组队事件发生时赋值。
 
 注意：这是一个比"残留风险"严重得多的运行时数据污染问题。main.lua:16-17 将 Fuyutsui.group 和 Fuyutsui.groupList 缓存到局部变量 group/groupList。updateGroup() 执行 self.group = {} 创建新表赋值给 Fuyutsui.group（`main.lua > Fuyutsui > updateGroup`），但局部变量 group 仍指向旧表。后续所有对 group 和 groupList 的写入（`main.lua > Fuyutsui > updateGroup` 中的 `table.insert(groupList, unit)` 和 `group[unit] = {...}`）操作的都是旧表。而所有队友更新函数（updateUnitHealthInfo、updateGroupInRangeAndHealth、OnUpdateUnitAura 等）都通过局部变量访问旧表。结果是：
 
@@ -185,7 +185,7 @@ self:CreatTexture(index, obj.healthPercent)
 
 `UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 仅通过 `updateUnitDeathByHealthInfo` 更新死亡/有效状态，不触发血量像素重新计算。血量像素由 `updateGroupInRangeAndHealth` 每帧按 `updateIndex` 轮询一个成员时调用 `updateUnitHealthInfo` 重新计算，刷新频率取决于轮询周期（单帧仅处理一个成员），与事件触发频率无关。注意：这些事件同样会更新玩家自身的血量显示。`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`（main.lua:1597-1598）在 `unit == "player"` 时调用 `self:updatePlayerHealth()`，与 `UNIT_HEALTH` / `UNIT_MAXHEALTH` / `UNIT_HEAL_PREDICTION` 的行为一致。
 
-注意：死亡状态检测由两个独立的函数覆盖。`updateUnitDeath` 通过 GUID 匹配直接将 `isDead` 置为 true，由 `UNIT_DIED` 事件触发（先经 `isSec` 过滤），适用于游戏明确发出死亡事件的场景。`updateUnitDeathByHealthInfo` 通过实时查询 `UnitIsDeadOrGhost` API 更新状态，由 `UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 等血量相关事件触发，适用于 `UnitIsDeadOrGhost` 状态已变更但未收到 `UNIT_DIED` 事件的场景（如下线、切区域）。两者共同保证死亡状态的覆盖，但调用路径和触发条件不同。
+注意：死亡状态检测由三个独立的路径覆盖。第一条路径 `updateUnitDeath` 通过 GUID 匹配直接将 `isDead` 置为 true，由 `UNIT_DIED` 事件触发（先经 `isSec` 过滤），适用于游戏明确发出死亡事件的场景。第二条路径 `updateUnitDeathByHealthInfo` 通过实时查询 `UnitIsDeadOrGhost` API 更新状态，由 `UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 等血量相关事件触发，适用于 `UnitIsDeadOrGhost` 状态已变更但未收到 `UNIT_DIED` 事件的场景（如下线、切区域）。第三条路径 `updateGroupInRangeAndHealth()` 按 `updateIndex` 在每帧轮询当前成员时直接调用 `UnitIsDeadOrGhost(unit)`，将结果写入 `obj.isDead`（`main.lua > Fuyutsui > updateGroupInRangeAndHealth`）。该路径与事件驱动路径的本质差异在于：无需等待 `UNIT_DIED` 或血量事件，每个成员每帧轮询一次。因此 `isDead` 的刷新频率取决于队伍人数——每帧仅处理一名成员，而非事件触发时立即更新。三者共同保证死亡状态的覆盖，但调用路径和触发条件不同。
 
 ## 职责、距离、死亡和视野
 
@@ -279,7 +279,7 @@ end
 - `getMaxAuraByTable`：迭代光环时调用 isSec 移除秘密值缓存条目。
 - `UNIT_SPELLCAST_SENT`：对 `targetName` 使用 isSec 过滤保护名。
 - `UNIT_DIED`：事件处理函数在调用 `updateUnitDeath(unitGUID)` 之前执行 `if not isSec(unitGUID)` 过滤，死亡事件同样受到秘密值门控。
-- `UNIT_AURA` 新增光环分支（`addedAuraInstanceIDs` 迭代）：在将光环写入 `obj.aura` 前使用 `not isSec(v.spellId)` 跳过暴雪隐藏了 spellId 的秘密光环。
+- `UNIT_AURA` 新增光环分支（`addedAuras` 迭代）：在将光环写入 `obj.aura` 前使用 `not isSec(v.spellId)` 跳过暴雪隐藏了 spellId 的秘密光环。注意新增分支的字段命名模式与更新分支（`updatedAuraInstanceIDs`）不同：新增分支直接提供光环数据对象（可访问 `v.spellId`、`v.sourceUnit`），而更新分支提供的是实例 ID 列表、需要二次拉取数据。
 - `UNIT_AURA` 更新已缓存光环分支（`updatedAuraInstanceIDs` 迭代）：重新拉取 aura 数据后使用 `not isSec(aura.spellId)` 条件过滤，是独立于 `getMaxAuraByTable` 遍历删除路径的额外过滤点。
 - `expirationTime == 0` 视为永久光环。Lua 传入 value=1，经 SetColorTexture(0, index/255, value, 1) 归一化编码后，B 通道 8 位值为 1.0 * 255 = 255。因此 Python 读到的是 255，与持续 255 秒的光环无法区分。
 - 有持续时间时，用 `C_UnitAuras.GetAuraDuration(unit, auraInstanceID)` 转成剩余秒数，最多 255。
@@ -458,8 +458,8 @@ Python 解码后的结构大致如下：
 |---|---|
 | `get_lowest_health_unit()` | 找血量最低且职责不为 0 的单位 |
 | `get_count_units_below_health()` / `count_units_below_health()` | 统计低血量单位数量 |
-| `get_unit_with_role()` | 找指定职责的单位 |
-| `get_unit_with_role_and_without_aura_name()` | 找指定职责且缺少某光环的单位 |
+| `get_unit_with_role()` | 找指定职责的单位；支持 `reverse` 参数控制正序/逆序查找（默认 `reverse=False` 返回正序第一个匹配单位，`reverse=True` 返回逆序最后一个匹配单位） |
+| `get_unit_with_role_and_without_aura_name()` | 找指定职责且缺少某光环的单位；支持 `reverse` 参数控制正序/逆序查找（默认 `reverse=False` 返回正序第一个匹配单位，`reverse=True` 返回逆序最后一个匹配单位） |
 | `get_lowest_health_unit_without_aura()` | 找缺少某光环且血量最低的单位 |
 | `get_lowest_health_unit_with_aura()` | 找有某光环且血量最低的单位 |
 | `get_lowest_health_unit_with_any_aura()` | 找拥有**任意一个**指定光环且血量最低的单位；支持可变参数 `*aura_names`，可传入多个光环名（如 `get_lowest_health_unit_with_any_aura(state_dict, '回春术', '愈合', '生命绽放')`），内部通过 `_has_any_aura()` 逐光环检查，任一匹配即视为有效。与 `get_lowest_health_unit_with_aura()`（仅接受单个光环名参数）不同。另支持可选关键字参数 `health_threshold`（默认 100），只考虑生命值低于该阈值的单位（默认排除满血目标）。调用方可覆盖此参数进一步限制候选范围（如 `health_threshold=90` 仅考虑血量 90% 以下的单位）。此参数为 Python 端工具函数的过滤行为，与 Lua 像素编码无关。 |
@@ -549,4 +549,7 @@ Python `config.yml` 中实际配置了这些 group 字段：
 | 2026-05-30 | 血量（事件刷新机制描述） | Theta 审核：「还会」措辞可能误认为事件触发血量像素重算 | 澄清事件仅通过 updateUnitDeathByHealthInfo 更新死亡/有效状态，血量像素由每帧轮询的 updateGroupInRangeAndHealth 调用 updateUnitHealthInfo 重新计算 |
 | 2026-05-30 | 血量（死亡处理函数区分） | Theta 审核：未区分两个死亡检测函数 | 补充 updateUnitDeath（GUID 匹配，UNIT_DIED 触发）与 updateUnitDeathByHealthInfo（API 查询，血量事件触发）的调用路径和覆盖范围差异 |
 | 2026-05-30 | 职责槽写入代码片段 | Theta 审核：未说明 falseValueBlack 定义及语义后果 | 补充 falseValueBlack 为纯黑色（B=0），超出距离单位与死亡/无效单位像素不可分的设计原因 |
-| 2026-05-30 | 队友增益（isSec 使用位置列举） | Theta 审核：遗漏 UNIT_AURA 事件处理函数的两条 isSec 过滤分支 | 补充 addedAuraInstanceIDs 分支和 updatedAuraInstanceIDs 分支，两条独立于 getMaxAuraByTable 的过滤路径 |
+| 2026-05-30 | 队友增益（isSec 使用位置列举） | Theta 审核：遗漏 UNIT_AURA 事件处理函数的两条 isSec 过滤分支；新增分支字段名 addedAuraInstanceIDs 与实际代码不符 | 补充 addedAuras 分支和 updatedAuraInstanceIDs 分支，两条独立于 getMaxAuraByTable 的过滤路径；修正新增分支字段名为 addedAuras，并说明新增分支与更新分支的字段命名模式差异 |
+| 2026-05-30 | 血量（死亡状态检测段落） | Iota 执行 Theta 审核：文档断言两个死亡检测函数覆盖，遗漏 updateGroupInRangeAndHealth 的第三条逐帧轮询路径 | 将「两个函数」更新为「三个路径」，新增对 updateGroupInRangeAndHealth() 轮询路径的描述，说明其无需事件触发、每帧处理一名成员、刷新频率取决于队伍人数的特点 |
+| 2026-05-30 | 队友列表来自哪里（canAssist 刷新生命周期） | Iota 执行 Theta 审核：文档说明 role 不随帧刷新但遗漏 canAssist 的逐帧动态更新行为 | 在 role 不刷新的注后补充 canAssist 在 updateGroupInRangeAndHealth() 中每帧重新赋值且立即参与 valid 计算的说明 |
+| 2026-05-30 | Python 如何使用队友信息（函数表） | Iota 执行 Theta 审核：get_unit_with_role() 和 get_unit_with_role_and_without_aura_name() 未提及 reverse 参数 | 为两个函数描述补充 reverse 参数说明（默认正序/可选逆序查找） |
