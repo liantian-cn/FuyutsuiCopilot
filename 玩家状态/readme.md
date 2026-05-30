@@ -91,6 +91,8 @@ state.valid = valid and 1 / 255 or 0
 
 注意 `updateDrinkStatus()` 的 else 分支会在法术名不是”饮水”或”进食饮水”时立即将 `drinkStatus` 置 false 并取消已有计时器。由于 `UNIT_SPELLCAST_SUCCEEDED` 对每次玩家成功施法都调用 `updateDrinkStatus(spellID)`，任何非饮水法术（包括战斗中的输出技能）都会立即清空 `drinkStatus`，实际窗口期远短于 20 秒。
 
+上述行为依赖 `UNIT_SPELLCAST_SUCCEEDED` 处理器调用 `updateDrinkStatus(spellID)` 的假设。但该处理器在被调用前存在 `isSec(spellID)` 守卫：当 `isSec(spellID)` 返回真时，整个回调在抵达 `updateDrinkStatus` 调用之前就提前返回了。在默认启用 `SetTestSecret(1)` 的情况下，spellID 作为受保护值类别，`isSec` 始终返回真，因此 `updateDrinkStatus` 实际上不会被 `UNIT_SPELLCAST_SUCCEEDED` 调用。综上，else 分支的清空行为仅在 `isSec(spellID)` 返回假时才成立；而在 `SetTestSecret(1)` 默认启用时（即开发/测试环境），spellID 始终受保护，分支 2 的 else 从不执行，`drinkStatus` 仅通过 `updatePlayerMoving()` 中的主动置 false 清空。详见「受保护值(isSec)对事件链的影响」一节。
+
 由于 `C_Spell.GetSpellName` 返回客户端本地化的法术名称，此 drinkStatus 检测机制仅在 zhCN/zhTW 客户端有效。跨语言 mod 应用 spellID 直接检测或检查客户端区域。
 
 注意当前源码里有一个细节：`updateShapeshiftForm()` 把 `state.shapeshiftFormID` 存成 `shapeshiftFormID / 255`，但 `updatePlayerMounted()` 又拿它和原始 ID `27`、`3`、`29` 比较。这意味着“通过变形形态判断坐骑”的分支很可能不起作用；普通坐骑仍由 `IsMounted()` 判断。
@@ -601,7 +603,7 @@ countBars 的 StatusBar 在 Fuyutsui > core/block.lua 注册了三个事件（`S
 - `延迟` 只由 `/fu delay` 写入，不是 `updatePlayerConfig()` 的初始化输出项。
 - 职业 Lua 里有字段不代表 Python 一定能读到；必须同步 `config.yml`。
 - Python `config.yml` 里有字段也不代表 Lua 一定会写；必须检查是否存在对应 `blocks.state["字段名"]` 更新路径。
-- Lua block index 与 config step 必须严格 1:1 对应。当前代码中存在违反此规则的实例：法师冰霜专精（专精 3）的 `config.yml` 中施法技能 step 22、敌人人数 step 23 比 `Mage.lua` 的 block index（分别为 21、22）偏移了 1，导致 Python 读取的像素值对应错误的 Lua 写入位置。
+- Lua block index 与 config step 必须严格 1:1 对应。当前代码中存在违反此规则的实例：法师冰霜专精（专精 3）的 `config.yml` 中施法技能 step 22、敌人人数 step 23 比 `Mage.lua` 的 block index（分别为 21、22）偏移了 1，导致 Python 读取的像素值对应错误的 Lua 写入位置。战士狂怒专精（专精 2）存在同类问题：`Warrior.lua` 专精 2 的 ClassBlocks 中 index 21 仅定义了类型为 block 的「敌人人数」，没有「目标生命值」条目；而 `config.yml` 战士专精 2 同时配置了目标生命值 step 21 和敌人人数 step 22。由于 `blocks.state['目标生命值']` 在狂怒专精中为 nil，`updateTargetHealth` 不会向任何像素写入目标血量值；step 21 实际读取的是敌人人数写入 index 21 的像素数据。mod 作者若按 `config.yml` 读取目标生命值，会在狂怒专精下始终读到错误数值（敌人人数）。
 - 在大秘境和评级 PvP 等受保护场景中，`isSec` 会拦截多项事件处理，导致饮水状态、法术失败记录、施法目标追踪等功能不可用或基于过期数据运行。依赖这些功能的 mod 需注意受保护内容中的行为差异。
 - `inComingHeals` 只覆盖 `helpfulSpells` 表中硬编码的治疗法术，自定义或非标准治疗法术不会产生 `inComingHeals` 曲线影响。
 
