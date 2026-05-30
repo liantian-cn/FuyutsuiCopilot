@@ -26,7 +26,11 @@
 | `1`–`8` | 团队模式 | `UnitInRaid('player')` 返回子队伍编号（1-8），写入值为 `subgroupNumber / 255`，Python 读到对应整数 |
 | `46` | 小队模式 | `UnitInParty('player')` 成立且 `UnitInRaid('player')` 不成立，写入值为 `46 / 255`，Python 读到整数 46 |
 
-队伍类型的判断顺序为：先判断团队（`UnitInRaid`），再判断小队（`UnitInParty`），两者均不成立则为单人。注意：单人模式写入值 0，与 `dataType` 为 0 或未被写入的像素槽状态无法区分——第三方作者若需要区分『单人』和『数据未就绪』两种场景需知晓此限制。三者共享同一 1 秒防抖窗口。因此连续快速重新组队时，`updateGroup()` 仅执行一次，mod 作者不能假设「队伍成员变化后立即能读到新数据」。注意：`GROUP_ROSTER_UPDATE` 处理函数（main.lua:1643-1654）的第一行即执行 state.castTargetName, state.castTargetUnit = nil, nil（main.lua:1644），这意味着队伍列表一发生变化，施法目标追踪立即丢失，而非等到1秒防抖结束后 updateGroup() 运行时才清除。此时 inComingHeals 在下一帧 updateUnitIncomingHealsCurve2() 被调用前仍依赖已失效的 castTargetUnit，mod作者不应在队伍变动期间假设 castTargetUnit 仍然有效。此外，该处理函数不清除 state.castTargetIndex。state.castTargetIndex 仅在 UNIT_SPELLCAST_STOP 事件处理中才被置为 0。从 GROUP_ROSTER_UPDATE 触发到下一次 UNIT_SPELLCAST_STOP 到达之间，castTargetIndex 保留旧目标的索引值，而 castTargetName 和 castTargetUnit 已为 nil，形成施法目标像素槽显示过期数据的短暂窗口。注意：初始化时 `GetCharacterSpecInfo()` 和 `updatePlayerBlocks()` 各调用一次 `updateGroup()`（分别通过 main.lua:349 和 main.lua:244），因此 `OnEnable` 中 `updateGroup` 会被执行两次。切专精时 `PLAYER_TALENT_UPDATE` 处理函数（main.lua:1365-1368）也通过 `updatePlayerSpecInfo` 间接调用和直接调用各一次，同样存在双重重入。此外，`UNIT_SPELLCAST_SUCCEEDED`（main.lua:1502-1513）在 spellID 384255（切换天赋）或 200749（切换专精）施放成功后执行 `C_Timer.After(1, self.updatePlayerSpecInfo)`，经 `updatePlayerSpecInfo()` → `updatePlayerBlocks()` → `updateGroup()` 链形成第 5 条触发路径。由于 `C_Timer.After` 的 1 秒延迟，该次 `updateGroup()` 调用在专精/天赋切换完成后约 1 秒才发生，期间存在数据窗口。mod 作者不应假设 `updateGroup()` 在任何生命周期内只会执行一次。
+队伍类型的判断顺序为：先判断团队（`UnitInRaid`），再判断小队（`UnitInParty`），两者均不成立则为单人。注意：单人模式写入值 0，与 `dataType` 为 0 或未被写入的像素槽状态无法区分——第三方作者若需要区分『单人』和『数据未就绪』两种场景需知晓此限制。
+
+注意：单人模式下 `GetNumGroupMembers()` 返回 0，写入『队伍人数』像素槽的值也为 0，与 Python 端 `state_dict["队伍人数"]` 默认值 0（未写入状态）无法区分——第三方作者若需要区分『单人』和『数据未就绪』两种场景需知晓此限制。（参见 `Fuyutsui/main.lua > Fuyutsui > updateGroupCount`）
+
+三者共享同一 1 秒防抖窗口。因此连续快速重新组队时，`updateGroup()` 仅执行一次，mod 作者不能假设「队伍成员变化后立即能读到新数据」。注意：`GROUP_ROSTER_UPDATE` 处理函数（main.lua:1643-1654）的第一行即执行 state.castTargetName, state.castTargetUnit = nil, nil（main.lua:1644），这意味着队伍列表一发生变化，施法目标追踪立即丢失，而非等到1秒防抖结束后 updateGroup() 运行时才清除。此时 inComingHeals 在下一帧 updateUnitIncomingHealsCurve2() 被调用前仍依赖已失效的 castTargetUnit，mod作者不应在队伍变动期间假设 castTargetUnit 仍然有效。此外，该处理函数不清除 state.castTargetIndex。state.castTargetIndex 在 UNIT_SPELLCAST_STOP 和 UNIT_SPELLCAST_CHANNEL_STOP 事件处理中均被置为 0。从 GROUP_ROSTER_UPDATE 触发到下一次 UNIT_SPELLCAST_STOP 到达之间，castTargetIndex 保留旧目标的索引值，而 castTargetName 和 castTargetUnit 已为 nil，形成施法目标像素槽显示过期数据的短暂窗口。注意：初始化时 `GetCharacterSpecInfo()` 和 `updatePlayerBlocks()` 各调用一次 `updateGroup()`（分别通过 main.lua:349 和 main.lua:244），因此 `OnEnable` 中 `updateGroup` 会被执行两次。切专精时 `PLAYER_TALENT_UPDATE` 处理函数（main.lua:1365-1368）也通过 `updatePlayerSpecInfo` 间接调用和直接调用各一次，同样存在双重重入。此外，`UNIT_SPELLCAST_SUCCEEDED`（main.lua:1502-1513）在 spellID 384255（切换天赋）或 200749（切换专精）施放成功后执行 `C_Timer.After(1, self.updatePlayerSpecInfo)`，经 `updatePlayerSpecInfo()` → `updatePlayerBlocks()` → `updateGroup()` 链形成第 5 条触发路径。由于 `C_Timer.After` 的 1 秒延迟，该次 `updateGroup()` 调用在专精/天赋切换完成后约 1 秒才发生，期间存在数据窗口。mod 作者不应假设 `updateGroup()` 在任何生命周期内只会执行一次。
 4. `updateGroupInRangeAndHealth()`、`UNIT_AURA()`、`OnUpdateUnitAura()` 等函数读取 WoW API，并调用 `CreatTexture(index, value)` 写入顶部像素。
 
 4a. `updateGroupInRangeAndHealth()` 由 `OnUpdate`（main.lua:1822）每帧调用一次，每次只处理一个成员。当前处理的成员由模块级局部变量 `updateIndex`（main.lua:19）控制，每处理完一个成员递增一次，到达列表末尾后重置为 1。
@@ -271,6 +275,8 @@ if not isSec(v.spellId) and v.sourceUnit == "player" then
     obj.aura[v.auraInstanceID] = v
 end
 ```
+
+此外，当 `updateGroup()` 被触发（初始化、切专精、队伍列表变化、`updatePlayerBlocks` 调用）时，在创建 `group[unit]` 条目后立即调用 `updateUnitFullAura(unit)`（`Fuyutsui/main.lua > Fuyutsui > updateGroup`），首次扫描该单位上玩家自身的前 5 个 `PLAYER|HELPFUL|RAID_IN_COMBAT` 光环写入 `obj.aura` 缓存。因此新成员的 aura 数据在加入 group 的同一帧即可用，无需等待后续的 `OnUpdateUnitAura()` 周期轮询或 `UNIT_AURA` 事件驱动更新。这一初始化填充行为与后续的 `UNIT_AURA` 增量维护（`addedAuras`/`updatedAuraInstanceIDs`/`removedAuraInstanceIDs` 分支）共同构成完整的光环生命周期。
 
 然后 `OnUpdateUnitAura()` 每 0.2 秒按 `blocks.groups.auras` 输出配置过的光环槽：
 
@@ -553,3 +559,6 @@ Python `config.yml` 中实际配置了这些 group 字段：
 | 2026-05-30 | 血量（死亡状态检测段落） | Iota 执行 Theta 审核：文档断言两个死亡检测函数覆盖，遗漏 updateGroupInRangeAndHealth 的第三条逐帧轮询路径 | 将「两个函数」更新为「三个路径」，新增对 updateGroupInRangeAndHealth() 轮询路径的描述，说明其无需事件触发、每帧处理一名成员、刷新频率取决于队伍人数的特点 |
 | 2026-05-30 | 队友列表来自哪里（canAssist 刷新生命周期） | Iota 执行 Theta 审核：文档说明 role 不随帧刷新但遗漏 canAssist 的逐帧动态更新行为 | 在 role 不刷新的注后补充 canAssist 在 updateGroupInRangeAndHealth() 中每帧重新赋值且立即参与 valid 计算的说明 |
 | 2026-05-30 | Python 如何使用队友信息（函数表） | Iota 执行 Theta 审核：get_unit_with_role() 和 get_unit_with_role_and_without_aura_name() 未提及 reverse 参数 | 为两个函数描述补充 reverse 参数说明（默认正序/可选逆序查找） |
+| 2026-05-30 | 总体链路（Step 3 — GROUP_ROSTER_UPDATE 处理说明） | Theta 审核：文档称「仅」在 UNIT_SPELLCAST_STOP 中置 0，遗漏 CHANNEL_STOP 也会清除 | 将「仅在 UNIT_SPELLCAST_STOP 中置 0」改为「在 UNIT_SPELLCAST_STOP 和 CHANNEL_STOP 中均置 0」 |
+| 2026-05-30 | 队友增益 | Theta 审核：缺失 updateGroup 创建 group[unit] 后立即调用 updateUnitFullAura 填充 aura 缓存的说明 | 补充 updateGroup 初始化时调用 updateUnitFullAura 立即填充新成员 aura 缓存的段落 |
+| 2026-05-30 | 总体链路（Step 3 — updateGroupCount 说明） | Theta 审核：缺少单人模式下队伍人数像素槽与未写入状态不可区分的警告 | 补充队伍人数在单人模式返回 0 与默认值不可区分的限制说明 |
