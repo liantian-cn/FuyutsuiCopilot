@@ -38,7 +38,12 @@ Workflow({ scriptPath: '.claude/workflows/fuyutsui-doc-review.js', args: { docNa
 
 ## 结果
 
-Workflow 完成后，文档 `{文档名称}/readme.md` 已被修改。总结以下信息告知用户：
+Workflow 完成后，文档 `{文档名称}/readme.md` 已被修改。
+
+- 每次运行只修改一个主题目录下的 `readme.md`，不存在误改其他文件的风险 — 其他文件不在 Iota 的权限范围内。
+- 多个审核团队可并行处理不同主题目录，每个团队只提交自己修改的那一个文件，互不干扰。
+
+总结以下信息告知用户：
 - 发现的问题数量和严重程度分布
 - 实际修改了多少处
 - 建议用户使用 `git diff` 查看具体变更
