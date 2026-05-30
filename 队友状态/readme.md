@@ -26,12 +26,12 @@
 | `1`–`8` | 团队模式 | `UnitInRaid('player')` 返回子队伍编号（1-8），写入值为 `subgroupNumber / 255`，Python 读到对应整数 |
 | `46` | 小队模式 | `UnitInParty('player')` 成立且 `UnitInRaid('player')` 不成立，写入值为 `46 / 255`，Python 读到整数 46 |
 
-队伍类型的判断顺序为：先判断团队（`UnitInRaid`），再判断小队（`UnitInParty`），两者均不成立则为单人。注意：单人模式写入值 0，与 `dataType` 为 0 或未被写入的像素槽状态无法区分——第三方作者若需要区分『单人』和『数据未就绪』两种场景需知晓此限制。三者共享同一 1 秒防抖窗口。因此连续快速重新组队时，`updateGroup()` 仅执行一次，mod 作者不能假设「队伍成员变化后立即能读到新数据」。注意：`GROUP_ROSTER_UPDATE` 处理函数（main.lua:1643-1654）的第一行即执行 state.castTargetName, state.castTargetUnit = nil, nil（main.lua:1644），这意味着队伍列表一发生变化，施法目标追踪立即丢失，而非等到1秒防抖结束后 updateGroup() 运行时才清除。此时 inComingHeals 在下一帧 updateUnitIncomingHealsCurve2() 被调用前仍依赖已失效的 castTargetUnit，mod作者不应在队伍变动期间假设 castTargetUnit 仍然有效。注意：初始化时 `GetCharacterSpecInfo()` 和 `updatePlayerBlocks()` 各调用一次 `updateGroup()`（分别通过 main.lua:349 和 main.lua:244），因此 `OnEnable` 中 `updateGroup` 会被执行两次。切专精时 `PLAYER_TALENT_UPDATE` 处理函数（main.lua:1365-1368）也通过 `updatePlayerSpecInfo` 间接调用和直接调用各一次，同样存在双重重入。此外，`UNIT_SPELLCAST_SUCCEEDED`（main.lua:1502-1513）在 spellID 384255（切换天赋）或 200749（切换专精）施放成功后执行 `C_Timer.After(1, self.updatePlayerSpecInfo)`，经 `updatePlayerSpecInfo()` → `updatePlayerBlocks()` → `updateGroup()` 链形成第 5 条触发路径。由于 `C_Timer.After` 的 1 秒延迟，该次 `updateGroup()` 调用在专精/天赋切换完成后约 1 秒才发生，期间存在数据窗口。mod 作者不应假设 `updateGroup()` 在任何生命周期内只会执行一次。
+队伍类型的判断顺序为：先判断团队（`UnitInRaid`），再判断小队（`UnitInParty`），两者均不成立则为单人。注意：单人模式写入值 0，与 `dataType` 为 0 或未被写入的像素槽状态无法区分——第三方作者若需要区分『单人』和『数据未就绪』两种场景需知晓此限制。三者共享同一 1 秒防抖窗口。因此连续快速重新组队时，`updateGroup()` 仅执行一次，mod 作者不能假设「队伍成员变化后立即能读到新数据」。注意：`GROUP_ROSTER_UPDATE` 处理函数（main.lua:1643-1654）的第一行即执行 state.castTargetName, state.castTargetUnit = nil, nil（main.lua:1644），这意味着队伍列表一发生变化，施法目标追踪立即丢失，而非等到1秒防抖结束后 updateGroup() 运行时才清除。此时 inComingHeals 在下一帧 updateUnitIncomingHealsCurve2() 被调用前仍依赖已失效的 castTargetUnit，mod作者不应在队伍变动期间假设 castTargetUnit 仍然有效。此外，该处理函数不清除 state.castTargetIndex。state.castTargetIndex 仅在 UNIT_SPELLCAST_STOP 事件处理中才被置为 0。从 GROUP_ROSTER_UPDATE 触发到下一次 UNIT_SPELLCAST_STOP 到达之间，castTargetIndex 保留旧目标的索引值，而 castTargetName 和 castTargetUnit 已为 nil，形成施法目标像素槽显示过期数据的短暂窗口。注意：初始化时 `GetCharacterSpecInfo()` 和 `updatePlayerBlocks()` 各调用一次 `updateGroup()`（分别通过 main.lua:349 和 main.lua:244），因此 `OnEnable` 中 `updateGroup` 会被执行两次。切专精时 `PLAYER_TALENT_UPDATE` 处理函数（main.lua:1365-1368）也通过 `updatePlayerSpecInfo` 间接调用和直接调用各一次，同样存在双重重入。此外，`UNIT_SPELLCAST_SUCCEEDED`（main.lua:1502-1513）在 spellID 384255（切换天赋）或 200749（切换专精）施放成功后执行 `C_Timer.After(1, self.updatePlayerSpecInfo)`，经 `updatePlayerSpecInfo()` → `updatePlayerBlocks()` → `updateGroup()` 链形成第 5 条触发路径。由于 `C_Timer.After` 的 1 秒延迟，该次 `updateGroup()` 调用在专精/天赋切换完成后约 1 秒才发生，期间存在数据窗口。mod 作者不应假设 `updateGroup()` 在任何生命周期内只会执行一次。
 4. `updateGroupInRangeAndHealth()`、`UNIT_AURA()`、`OnUpdateUnitAura()` 等函数读取 WoW API，并调用 `CreatTexture(index, value)` 写入顶部像素。
 
 4a. `updateGroupInRangeAndHealth()` 由 `OnUpdate`（main.lua:1822）每帧调用一次，每次只处理一个成员。当前处理的成员由模块级局部变量 `updateIndex`（main.lua:19）控制，每处理完一个成员递增一次，到达列表末尾后重置为 1。
 
-注意：当 `updateIndex > #groupList` 时（即队伍列表缩小但 updateIndex 未重置），该函数在 main.lua:1117-1118 处因 `groupList[updateIndex]` 返回 nil 而提前 return，且不递增 updateIndex，导致刷新停滞。此风险在当前源码中因双表分裂问题（groupList 从不缩小）被掩盖，但修复后必须在 updateGroup() 末尾配套重置 updateIndex = 1。详见「队友列表来自哪里」节第 131 行的说明。（另见「需要注意的细节」节相关补充说明。）
+注意：当 `updateIndex > #groupList` 时（即队伍列表缩小但 updateIndex 未重置），该函数在 main.lua:1117-1118 处因 `groupList[updateIndex]` 返回 nil 而提前 return，且不递增 updateIndex，导致刷新停滞。此风险在当前源码中因双表分裂问题（groupList 从不缩小）被掩盖，但修复后必须在 updateGroup() 末尾配套重置 updateIndex = 1。详见「队友列表来自哪里」节关于双表分裂和数据污染的说明。（另见「需要注意的细节」节相关补充说明。）
 5. `Fuyutsui/Fuyutsui/GetPixels.py` 用 `mss` 截取顶部一行，按像素 G/B 通道解码。
 6. `Fuyutsui/Fuyutsui/config.yml` 的 `group:` 配置把连续像素槽映射成 `state_dict["group"]`。
 7. `Fuyutsui/Fuyutsui/utils.py` 和职业逻辑用 `state_dict["group"]` 选择治疗、驱散、补 Buff 的目标。
@@ -135,7 +135,7 @@ local i = reversed and numGroupMembers or (unit == 'party' and 0 or 1)
 
 注意：`obj.role` 仅在 `updateGroup()` 执行时赋值（main.lua:1308-1311）。`updateGroup()` 的触发路径包括初始化、`PLAYER_TALENT_UPDATE`（切专精）、`GROUP_ROSTER_UPDATE`（队伍变化，带 1 秒防抖）和 `updatePlayerBlocks()`。`obj.role` **不随** 每帧的 `updateGroupInRangeAndHealth()` 刷新（main.lua:1126 读取 obj.role 但不重新调用 `UnitGroupRolesAssigned`）。因此，战斗中通过团队面板修改某个玩家的职责后，Python 端 `state_dict["group"][slot]["职责"]` 的值不会立即更新，需等待下一次 `updateGroup()` 触发才能反映变更。
 
-注意：这是一个比"残留风险"严重得多的运行时数据污染问题。main.lua:16-17 将 Fuyutsui.group 和 Fuyutsui.groupList 缓存到局部变量 group/groupList。updateGroup()（第 1303 行）执行 self.group = {} 创建新表赋值给 Fuyutsui.group，但局部变量 group 仍指向旧表。后续所有对 group 和 groupList 的写入（第 1307 行 table.insert(groupList, unit)、第 1312 行 group[unit] = {...}）操作的都是旧表。而所有队友更新函数（updateUnitHealthInfo、updateGroupInRangeAndHealth、OnUpdateUnitAura 等）都通过局部变量访问旧表。结果是：
+注意：这是一个比"残留风险"严重得多的运行时数据污染问题。main.lua:16-17 将 Fuyutsui.group 和 Fuyutsui.groupList 缓存到局部变量 group/groupList。updateGroup() 执行 self.group = {} 创建新表赋值给 Fuyutsui.group（`main.lua > Fuyutsui > updateGroup`），但局部变量 group 仍指向旧表。后续所有对 group 和 groupList 的写入（`main.lua > Fuyutsui > updateGroup` 中的 `table.insert(groupList, unit)` 和 `group[unit] = {...}`）操作的都是旧表。而所有队友更新函数（updateUnitHealthInfo、updateGroupInRangeAndHealth、OnUpdateUnitAura 等）都通过局部变量访问旧表。结果是：
 
 1. groupList（旧表）永远不会被清空，每次 updateGroup() 调用后持续积累重复条目。
 2. 离队成员的条目永远保留在旧 group 表中，不会被移除。
@@ -183,7 +183,9 @@ self:CreatTexture(index, obj.healthPercent)
 
 注意当前 helpfulSpells 只覆盖了牧师（快速治疗、祈福、暗影愈合）、圣骑士（圣光术、圣光闪现）、德鲁伊（愈合）、萨满（治疗波）。织雾武僧的活血术/氤氲之雾和戒律牧师的苦修等主要单体治疗法术不在其中。
 
-`UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 会更新死亡/有效状态；实际血量像素还会在每帧的 `updateGroupInRangeAndHealth()` 中轮询刷新。注意：这些事件同样会更新玩家自身的血量显示。`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`（main.lua:1597-1598）在 `unit == "player"` 时调用 `self:updatePlayerHealth()`，与 `UNIT_HEALTH` / `UNIT_MAXHEALTH` / `UNIT_HEAL_PREDICTION` 的行为一致。
+`UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 仅通过 `updateUnitDeathByHealthInfo` 更新死亡/有效状态，不触发血量像素重新计算。血量像素由 `updateGroupInRangeAndHealth` 每帧按 `updateIndex` 轮询一个成员时调用 `updateUnitHealthInfo` 重新计算，刷新频率取决于轮询周期（单帧仅处理一个成员），与事件触发频率无关。注意：这些事件同样会更新玩家自身的血量显示。`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`（main.lua:1597-1598）在 `unit == "player"` 时调用 `self:updatePlayerHealth()`，与 `UNIT_HEALTH` / `UNIT_MAXHEALTH` / `UNIT_HEAL_PREDICTION` 的行为一致。
+
+注意：死亡状态检测由两个独立的函数覆盖。`updateUnitDeath` 通过 GUID 匹配直接将 `isDead` 置为 true，由 `UNIT_DIED` 事件触发（先经 `isSec` 过滤），适用于游戏明确发出死亡事件的场景。`updateUnitDeathByHealthInfo` 通过实时查询 `UnitIsDeadOrGhost` API 更新状态，由 `UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 等血量相关事件触发，适用于 `UnitIsDeadOrGhost` 状态已变更但未收到 `UNIT_DIED` 事件的场景（如下线、切区域）。两者共同保证死亡状态的覆盖，但调用路径和触发条件不同。
 
 ## 职责、距离、死亡和视野
 
@@ -485,7 +487,7 @@ Python `config.yml` 中实际配置了这些 group 字段：
 - `updateGroupInRangeAndHealth()` 每帧只刷新一个队友的血量和职责槽，团队人数多时完整轮询需要多帧。
 - `OnUpdateUnitAura()` 每 0.2 秒刷新一次队友光环槽。
 - `UNIT_AURA()` 只在队友 aura 事件到来时刷新驱散槽；如果状态异常，可能要等下一次 aura 事件或重新建组。
-- `updateGroup()` 目前不会主动调用 `clearGroupBlocks()`；同时局部 `group`/`groupList` 没有被清空。队伍人数减少或重新建组时，这是一个比"残留风险"严重得多的运行时数据污染问题。main.lua:16-17 将 Fuyutsui.group 和 Fuyutsui.groupList 缓存到局部变量 group/groupList。updateGroup()（第 1303 行）执行 self.group = {} 创建新表赋值给 Fuyutsui.group，但局部变量 group 仍指向旧表。后续所有对 group 和 groupList 的写入（第 1307 行 table.insert(groupList, unit)、第 1312 行 group[unit] = {...}）操作的都是旧表。而所有队友更新函数——包括 updateGroup() 末尾调用的 self:updateUnitValid(unit)、self:updateUnitHealthInfo(unit)、self:updateUnitFullAura(unit)（main.lua:1329-1331），以及 updateUnitHealthInfo、updateGroupInRangeAndHealth、OnUpdateUnitAura 等——都通过局部变量访问旧表。结果是：
+- `updateGroup()` 目前不会主动调用 `clearGroupBlocks()`；同时局部 `group`/`groupList` 没有被清空。队伍人数减少或重新建组时，这是一个比"残留风险"严重得多的运行时数据污染问题。main.lua:16-17 将 Fuyutsui.group 和 Fuyutsui.groupList 缓存到局部变量 group/groupList。updateGroup() 执行 self.group = {} 创建新表赋值给 Fuyutsui.group（`main.lua > Fuyutsui > updateGroup`），但局部变量 group 仍指向旧表。后续所有对 group 和 groupList 的写入（`main.lua > Fuyutsui > updateGroup` 中的 `table.insert(groupList, unit)` 和 `group[unit] = {...}）`操作的都是旧表。而所有队友更新函数——包括 updateGroup() 末尾调用的 self:updateUnitValid(unit)、self:updateUnitHealthInfo(unit)、self:updateUnitFullAura(unit)（`main.lua > Fuyutsui > updateGroup` 末尾），以及 updateUnitHealthInfo、updateGroupInRangeAndHealth、OnUpdateUnitAura 等——都通过局部变量访问旧表。结果是：
 
 1. groupList（旧表）永远不会被清空，每次 updateGroup() 调用后持续积累重复条目。
 2. 离队成员的条目永远保留在旧 group 表中，不会被移除。
