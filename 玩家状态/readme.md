@@ -130,7 +130,7 @@ self:updatePlayerPower(powerType)
 
 - 最大值大于等于 250：按 0-100 输出百分比，适合法力这类大资源。
 - 最大值小于 250：按 0-`powerMax` 输出实际点数，适合能量、怒气等较小资源。
-- EnumPowerType 映射表定义在 Fuyutsui > core/config.lua > EnumPowerType：MANA=0、RAGE=1、FOCUS=2、ENERGY=3、COMBO_POINTS=4、RUNES=5、RUNIC_POWER=6、SOUL_SHARDS=7、LUNAR_POWER=8、HOLY_POWER=9、MAELSTROM=11、CHI=12、INSANITY=13、BURNING_EMBERS=14、DEMONIC_FURY=15、ARCANE_CHARGES=16、FURY=17、PAIN=17（注：PAIN 与 FURY 共享 ID 17）、ESSENCE=19、SHADOW_ORBS=28。
+- EnumPowerType 映射表定义在 Fuyutsui > core/config.lua > EnumPowerType：MANA=0、RAGE=1、FOCUS=2、ENERGY=3、COMBO_POINTS=4、RUNES=5、RUNIC_POWER=6、SOUL_SHARDS=7、LUNAR_POWER=8、HOLY_POWER=9、MAELSTROM=11、CHI=12、INSANITY=13、BURNING_EMBERS=14（历史遗留，当前版本已移除）、DEMONIC_FURY=15（历史遗留，当前版本已移除）、ARCANE_CHARGES=16、FURY=17、PAIN=17（注：PAIN 与 FURY 共享 ID 17）、ESSENCE=19、SHADOW_ORBS=28。
 - `CreatPowerCurve(powerType)` 有永久缓存机制：首次为某资源类型创建曲线后缓存于 `powerCurve[powerType]`，后续调用直接返回缓存（Fuyutsui > main.lua > CreatPowerCurve > powerCurve 缓存 `if powerCurve[powerType] then return end`）。这意味着曲线在运行期间不会因资源最大值变化（如专精切换、等级提升）而更新。
 
 `updatePlayerPower(powerType)` 还有一个特殊资源分支：
@@ -153,7 +153,7 @@ local specialPowerMap = {
 - 当 `UnitPower()` 不是受保护值，并且资源类型在 `specialPowerMap` 中时，写 `神圣能量`、`连击点`、`灵魂碎片`、`真气`、`精华能量` 等专用字段。
 - 当 `UnitPower()` 不是受保护值，并且资源类型不在 `specialPowerMap` 中时，当前源码没有在这个函数里写 `能量值`。
 
-对于 mana/rage/focus/energy/runic_power/lunar_power/insanity/fury/pain/maelstrom 等不在 specialPowerMap（仅含连击点/神圣能量/精华能量/灵魂碎片/真气五种）中的资源类型，且 isSec(power) 为假时，三路分支均不执行更新 `能量值`，能量值（step 12 对应像素）永远不会被此函数更新。受影响的职业包括但不限于：战士（怒气）、法师（法力）、死亡骑士（符文能量）、猎人（集中值）、牧师（法力）、德鲁伊非连击点专精（法力/怒气/能量）、萨满（法力；元素/增强专精为漩涡，法力仅适用于恢复专精）等。这些职业的能量值字段实质上无法通过 `updatePlayerPower` 刷新。
+对于 mana/rage/focus/energy/runic_power/lunar_power/insanity/fury/pain/maelstrom 等不在 specialPowerMap（仅含连击点/神圣能量/精华能量/灵魂碎片/真气五种）中的资源类型，且 isSec(power) 为假时，三路分支均不执行更新 `能量值`，能量值（step 12 对应像素）永远不会被此函数更新。受影响的职业包括但不限于：战士（怒气）、法师（法力）、死亡骑士（符文能量）、猎人（集中值）、牧师（法力）、德鲁伊非连击点专精（法力/怒气/能量）、萨满（法力；元素/增强专精为漩涡，法力仅适用于恢复专精）、恶魔猎手（怒意/痛苦）等。这些职业的能量值字段实质上无法通过 `updatePlayerPower` 刷新。
 
 注意：SetTestSecret(1) 强制 secret*RestrictionsForced 系 CVar 为 1 使 isSec() 对确实受保护的值类别（spellID、GUID、名字、光环数据）返回真，但玩家自身 UnitPower("player") 返回的简单整数不属于受保护类别（此结论基于 WoW API 在非受保护环境中 UnitPower 返回常见整数值时的观察，SetTestSecret(1) 后的具体行为边界未经官方确认，属于推测性描述）。因此 isSec(power) 在运行时返回假，specialPowerMap 分支正常执行，通过 CreatTexture(blockIndex, power / 255) 写入 神圣能量/连击点/灵魂碎片/真气/精华能量。对于 Paladin/Druid/Evoker/Warlock/Monk 专精，if not isSec(power) and specialPower 分支是实际运行路径，分支 1（UnitPowerPercent -> 能量值）仅在资源类型不在 specialPowerMap 中时执行。
 
@@ -195,6 +195,7 @@ local staggerPercent = damage / maxHealth * 100
 | `UNIT_SPELLCAST_FAILED` | `updateSpellFailed()` | `isSec(spellID)` | 若 spellID 受保护，跳过 `updateSpellFailed`，不记录法术失败 |
 | `UNIT_SPELLCAST_SENT` | 事件处理器 | `isSec(targetName)` | 若目标名受保护，阻止设置 `state.castTargetIndex`/`castTargetName`/`castTargetUnit` |
 | `UNIT_DIED` | 事件处理器 | `isSec(unitGUID)` | 若 unitGUID 受保护，跳过 `updateUnitDeath`，不检测该单位死亡 |
+| `SPELL_UPDATE_COOLDOWN` | `updateDrinkStatus()` 所在事件处理器（实际跳过的是 `updateAuraBySpellCooldown`） | `isSec(spellID)` | 若 spellID 受保护，跳过 `updateAuraBySpellCooldown`，不通过冷却事件同步光环结束时间与层数 |
 
 在大秘境或评级 PvP 等受保护内容中运行 mod 时，这些拦截的具体影响包括：
 
@@ -281,7 +282,7 @@ if 引导 > 0:
 （3）对比 CHANNEL_STOP（Fuyutsui > main.lua > CHANNEL_STOP 事件处理器）的正确模式 `if unitTarget == "player" ... elseif unitTarget == "target"` 可清楚看出设计缺陷。
 如果游戏内蓄力状态出现残留，应优先检查这里。
 
-此外，`state.casting`/`channeling`/`empowering` 三个状态纯由 WoW 事件驱动（START 置 true、STOP 置 false），`OnUpdate` 中对应的 `updatePlayerCastingInfo`/`channelingInfo`/`empowerInfo`（Fuyutsui > main.lua > OnUpdate）在 `Duration` 对象为 nil 时只写 0 到纹理，不会自行清除对应状态标记。若 STOP 事件因断线、UI 重载、事件抑制等丢失，状态标记将永久滞留为 true，导致每帧访问失效的 `Duration` 对象（Fuyutsui > main.lua > Duration 对象访问）。该风险涉及系统可靠性，mod 作者在做容错分析时应注意这一点。同时 `EMPOWER_STOP` 处理函数（Fuyutsui > main.lua > EMPOWER_STOP 事件处理器）使用 `unitTarget ~= 'player'` 而非 `== 'player'` 的条件来清除玩家蓄力状态，属于明显的条件反转，使玩家自身蓄力清除路径更加脆弱。
+此外，`state.casting`/`channeling`/`empowering` 三个状态纯由 WoW 事件驱动（START 置 true、STOP 置 false），`OnUpdate` 中对应的 `updatePlayerCastingInfo`/`channelingInfo`/`empowerInfo`（Fuyutsui > main.lua > OnUpdate）在 `Duration` 对象为 nil 时只写 0 到纹理，不会自行清除对应状态标记。若 STOP 事件因断线、UI 重载、事件抑制等丢失，状态标记将永久滞留为 true，导致每帧访问失效的 `Duration` 对象（Fuyutsui > main.lua > Duration 对象访问）。各 STOP 事件处理函数（UNIT_SPELLCAST_STOP、CHANNEL_STOP、EMPOWER_STOP）还同时清除 state.castTargetUnit（nil）、state.castTargetName（nil）和 state.castTargetIndex（0）。若对应 STOP 事件丢失，这些字段同样会携带过期值，mod 作者在容错分析时需一并考虑。该风险涉及系统可靠性，mod 作者在做容错分析时应注意这一点。同时 `EMPOWER_STOP` 处理函数（Fuyutsui > main.lua > EMPOWER_STOP 事件处理器）使用 `unitTarget ~= 'player'` 而非 `== 'player'` 的条件来清除玩家蓄力状态，属于明显的条件反转，使玩家自身蓄力清除路径更加脆弱。
 
 ## 目标相关状态
 
@@ -343,7 +344,7 @@ Python 读到的是 `maxRange` 的整数近似值，不是精确坐标距离。
 
 注意 `testMap` 和 `testEncounter` 是硬编码在 Fuyutsui > main.lua > testMap/testEncounter 的 local 变量（非全局可配置表），第三方 mod 无法通过配置新增豁免条目。变量名以 `test` 为前缀暗示其调试/测试用途，不构成通用扩展机制。
 
-另外初始 `state` 对象（Fuyutsui > core.lua 初始 state）中无 `mapID` 和 `encounterID` 字段。`state.mapID` 在首次 `ZONE_CHANGED`/`PLAYER_ENTERING_WORLD` 前为 nil（Fuyutsui > main.lua > ZONE_CHANGED/PLAYER_ENTERING_WORLD 事件处理器），`state.encounterID` 在首次 `ENCOUNTER_START` 前为 nil。Fuyutsui > main.lua > testMap 的 nil 安全短络检查（`state.mapID and testMap[state.mapID]`）在 nil 时短路返回假，因此从游戏启动到首次进入有效区域/首领战之前，`testMap`/`testEncounter` 的放宽战斗条件豁免不生效。
+另外初始 `state` 对象（Fuyutsui > core.lua 初始 state）中无 `mapID` 和 `encounterID` 字段。`state.mapID` 在首次 `ZONE_CHANGED`/`ZONE_CHANGED_INDOORS`/`PLAYER_ENTERING_WORLD` 前为 nil（Fuyutsui > main.lua > ZONE_CHANGED/ZONE_CHANGED_INDOORS/PLAYER_ENTERING_WORLD 事件处理器），`state.encounterID` 在首次 `ENCOUNTER_START` 前为 nil。Fuyutsui > main.lua > testMap 的 nil 安全短络检查（`state.mapID and testMap[state.mapID]`）在 nil 时短路返回假，因此从游戏启动到首次进入有效区域/首领战之前，`testMap`/`testEncounter` 的放宽战斗条件豁免不生效。
 
 ## 队伍状态
 
@@ -579,7 +580,7 @@ countBars 的 StatusBar 在 Fuyutsui > core/block.lua 注册了三个事件（`S
 | 血量、能量、移动、死亡、坐骑、队伍变化、目标变化、首领战、法术失败 | 对应 WoW 事件触发 |
 | Python `get_info()` | `logic_gui.py` 约每 0.2 秒 |
 
-> 备注：`法术失败` 由 `UNIT_SPELLCAST_FAILED` 事件驱动刷新。`英雄天赋` 在 `updatePlayerBlocks` 中经 `C_Timer.After(1)` 延迟初始化，此外还会在 `PLAYER_ENTERING_WORLD` 事件触发时（登录、区域切换、UI 重载等场景）被刷新。虽然不属定期轮询机制，但存在多个触发入口。
+> 备注：`法术失败` 由 `UNIT_SPELLCAST_FAILED` 事件驱动刷新。`英雄天赋` 在 `updatePlayerBlocks` 中经 `C_Timer.After(1)` 延迟初始化，此外还会在 `PLAYER_ENTERING_WORLD` 事件触发时（登录、区域切换、UI 重载等场景）被刷新。虽然不属定期轮询机制，但存在多个触发入口。`一键辅助` 在 `updatePlayerBlocks` 初始化时也会被调用一次，独立于 OnUpdate 每 0.2 秒的定期刷新。
 
 因此 Python 端看到的玩家状态通常会有 0-0.4 秒量级延迟。它不保存历史状态，也不做预测，每轮都是重新截图并重建 `state_dict`。
 
@@ -681,3 +682,9 @@ countBars 的 StatusBar 在 Fuyutsui > core/block.lua 注册了三个事件（`S
 | 2026-05-30 | Iota | 目标类型 | Theta 终审 | 补充 dispelAbilities[11] 流血驱散空条目边缘情况说明 |
 | 2026-05-30 | Iota | 生命值 | Theta 终审 | 补充 UNIT_HEAL_PREDICTION 对队伍成员引入最多 1 帧延迟 |
 | 2026-05-30 | Iota | 修订记录 | Theta 终审 | 将行号引用替换为调用链定位符 |
+| 2026-05-30 | Iota | 能量值和职业资源 — EnumPowerType 映射表 | Theta 最终审校 | 标注 BURNING_EMBERS=14 和 DEMONIC_FURY=15 为历史遗留条目 |
+| 2026-05-30 | Iota | 敌人人数 — state.mapID 更新来源 | Theta 最终审校 | 补充 ZONE_CHANGED_INDOORS 为 state.mapID 第三个更新来源 |
+| 2026-05-30 | Iota | 受保护值(isSec)对事件链的影响 — isSec 拦截汇总表 | Theta 最终审校 | 新增 SPELL_UPDATE_COOLDOWN 行，说明 isSec(spellID) 跳过 updateAuraBySpellCooldown |
+| 2026-05-30 | Iota | 刷新频率 — 备注说明 | Theta 最终审校 | 补充一键辅助在 updatePlayerBlocks 初始化时也被调用一次 |
+| 2026-05-30 | Iota | 施法、引导和蓄力 — STOP 事件丢失风险 | Theta 最终审校 | 补充 castTargetUnit/castTargetName/castTargetIndex 在 STOP 事件丢失时也携带过期值 |
+| 2026-05-30 | Iota | 能量值和职业资源 — 受影响职业列表 | Theta 最终审校 | 补充恶魔猎手（怒意/痛苦）至受影响职业列表 |
