@@ -87,7 +87,7 @@ base_step = start + (i - 1) * num
 row_key = base_step + rel_step
 ```
 
-注意：GetPixels.py 第 352 行的注释写有 `-1`（`row_key=base_step+(rel_step-1)`），但实际代码第 370 行使用的是 `row_key = base_step + rel_step` 无 `-1`，与本文档公式一致。该注释具有误导性，mod 作者应以实际代码为准。
+注意：GetPixels.py 中注释写有 `-1`（`row_key=base_step+(rel_step-1)`），但实际代码使用的是 `row_key = base_step + rel_step` 无 `-1`，与本文档公式一致。该注释具有误导性，mod 作者应以实际代码为准。
 
 Python 固定解析 30 个槽位，生成 `state_dict["group"]["1"]` 到 `state_dict["group"]["30"]`。Lua 只会主动刷新当前遍历到的队伍成员；如果某个像素槽没有被写入，Python 会读成 0，但当前源码没有在重新建组时清空全部 group 槽位，旧槽位可能残留。
 
@@ -204,6 +204,8 @@ self:CreatTexture(index, b)
 
 无效时直接写 0。
 
+注意：`falseValueBlack` 在 `main.lua` 中定义为 `CreateColor(0,0,0,1)`，即纯黑色（B=0）。因此当 `inRange` 为 false 时，`EvaluateColorFromBoolean(inRange, trueValue, falseValueBlack)` 返回 `falseValueBlack` 的 B 通道值 0，使得超出距离的有效单位与死亡/无效/未写入单位在"职责"像素槽中同样输出 0。超出距离与其他无效状态像素不可分是 `falseValueBlack` 为纯黑这一设计决策的直接结果。
+
 职责编码为：
 
 | Python 值 | 含义 |
@@ -273,14 +275,19 @@ end
 然后 `OnUpdateUnitAura()` 每 0.2 秒按 `blocks.groups.auras` 输出配置过的光环槽：
 
 - 一个槽可以配置多个 spellId。
-- `getMaxAuraByTable()` 会选过期时间最晚的那个光环。另外，该函数在迭代光环时会调用 `isSec()` 删除秘密值光环的缓存项（main.lua:1224-1225），看到秘密值光环时直接从 obj.aura 中移除。注意：getMaxAuraByTable 采用嵌套 pairs 遍历（外层 for spellIds × 内层 for obj.aura，main.lua:1222-1223）。当 aurals 配置了多个 spellId 时，isSec 检查和删除在第 1224 行的内层循环中对外层每个 spellId 都会执行一次。第一轮外层遍历已将 isSec 条目从 obj.aura 中删除，但后续各轮仍会完整遍历整个 obj.aura——虽已不会被 isSec 再次命中（nil 赋值是幂等的），但遍历本身是冗余的。此嵌套模式在 spellId 较多时有微性能开销，但不影响功能正确性。`isSec` 是 `main.lua:2` 定义的局部别名 `local isSec = issecretvalue`，对应 WoW API `issecretvalue`。暴雪对特定光环隐藏 spellId、targetName、unitGUID 等数据，`isSec()` 用于过滤这些受保护的秘密/遮蔽值（getMaxAuraByTable 第 1224 行在迭代光环时调用 isSec 移除秘密值缓存；UNIT_SPELLCAST_SENT 第 1411 行对 targetName 使用 isSec 过滤保护名；UNIT_DIED 事件处理函数 main.lua:1656-1659 在调用 updateUnitDeath(unitGUID) 之前也执行 if not isSec(unitGUID) 过滤，死亡事件同样受到秘密值门控）。
+- `getMaxAuraByTable()` 会选过期时间最晚的那个光环。另外，该函数在迭代光环时会调用 `isSec()` 删除秘密值光环的缓存项（main.lua:1224-1225），看到秘密值光环时直接从 obj.aura 中移除。注意：getMaxAuraByTable 采用嵌套 pairs 遍历（外层 for spellIds × 内层 for obj.aura，main.lua:1222-1223）。当 aurals 配置了多个 spellId 时，isSec 检查和删除（`main.lua > getMaxAuraByTable > 内层循环`）对外层每个 spellId 都会执行一次。第一轮外层遍历已将 isSec 条目从 obj.aura 中删除，但后续各轮仍会完整遍历整个 obj.aura——虽已不会被 isSec 再次命中（nil 赋值是幂等的），但遍历本身是冗余的。此嵌套模式在 spellId 较多时有微性能开销，但不影响功能正确性。`isSec` 是 `main.lua` 顶部定义的局部别名 `local isSec = issecretvalue`，对应 WoW API `issecretvalue`。暴雪对特定光环隐藏 spellId、targetName、unitGUID 等数据，`isSec()` 用于过滤这些受保护的秘密/遮蔽值，使用位置包括：
+- `getMaxAuraByTable`：迭代光环时调用 isSec 移除秘密值缓存条目。
+- `UNIT_SPELLCAST_SENT`：对 `targetName` 使用 isSec 过滤保护名。
+- `UNIT_DIED`：事件处理函数在调用 `updateUnitDeath(unitGUID)` 之前执行 `if not isSec(unitGUID)` 过滤，死亡事件同样受到秘密值门控。
+- `UNIT_AURA` 新增光环分支（`addedAuraInstanceIDs` 迭代）：在将光环写入 `obj.aura` 前使用 `not isSec(v.spellId)` 跳过暴雪隐藏了 spellId 的秘密光环。
+- `UNIT_AURA` 更新已缓存光环分支（`updatedAuraInstanceIDs` 迭代）：重新拉取 aura 数据后使用 `not isSec(aura.spellId)` 条件过滤，是独立于 `getMaxAuraByTable` 遍历删除路径的额外过滤点。
 - `expirationTime == 0` 视为永久光环。Lua 传入 value=1，经 SetColorTexture(0, index/255, value, 1) 归一化编码后，B 通道 8 位值为 1.0 * 255 = 255。因此 Python 读到的是 255，与持续 255 秒的光环无法区分。
 - 有持续时间时，用 `C_UnitAuras.GetAuraDuration(unit, auraInstanceID)` 转成剩余秒数，最多 255。
 - 没有匹配光环时写 0。
 
 这些字段在 Python 中直接表现为 `state_dict["group"][slot]["光环名"]` 的整数值。职业逻辑通常只判断是否为 0，或者选择没有某个光环的单位。
 
-全量光环更新只把前 5 个 `PLAYER|HELPFUL|RAID_IN_COMBAT` Buff 写入 `obj.aura`，不会先清空旧缓存。Blizzard 的 GetBuffDataByIndex 按优先级、剩余时间等内部规则排序，不是简单的原始施放顺序。如果玩家在目标身上有超过 5 个可控的 HELPFUL Buff，仅前 5 个会被缓存到 obj.aura 中，后续的光环输出可能不完整。如果旧 aura 没有通过 `removedAuraInstanceIDs` 删除，缓存里可能暂时保留过期的 `auraInstanceID`。需特别注意一种边界情况：同一法术光环被移除后重新施加时，旧 auraInstanceID（来自移除前）可能未出现在 removedAuraInstanceIDs 中而继续留在 obj.aura 中。getMaxAuraByTable 遍历 obj.aura 时，若新旧两个条目具有相同的 spellId，它将按 expirationTime 取最大值。旧条目的 expirationTime 是原施放时的剩余时间，若该法术原施放时续较长（如 30 秒）但在几秒后被移除，则旧条目的 expirationTime 可能大于新施加条目的 expirationTime，导致 getMaxAuraByTable 选中已过期的旧条目。此时 C_UnitAuras.GetAuraDuration(unit, oldAuraInstanceID) 因旧实例已过期而返回 nil，最终该光环槽输出 0 而非正确值。另外，`OnUpdateUnitAura()` 一开始要求 `blocks.groups.auras` 存在；因此只配置 `rejuv`、不配置 `auras` 的 group 块不会输出回春数量。这是一个结构性问题，不是简单的功能不可用——如果只配置 rejuv 而不配置 auras，OnUpdateUnitAura()（main.lua:1248-1249）在第 1249 行检查 blocks.groups.auras 为 nil 后直接 return，整个函数静默退出，rejuv 分支（第 1270 行）永远不可达。
+全量光环更新只把前 5 个 `PLAYER|HELPFUL|RAID_IN_COMBAT` Buff 写入 `obj.aura`，不会先清空旧缓存。Blizzard 的 GetBuffDataByIndex 按优先级、剩余时间等内部规则排序，不是简单的原始施放顺序。如果玩家在目标身上有超过 5 个可控的 HELPFUL Buff，仅前 5 个会被缓存到 obj.aura 中，后续的光环输出可能不完整。如果旧 aura 没有通过 `removedAuraInstanceIDs` 删除，缓存里可能暂时保留过期的 `auraInstanceID`。需特别注意一种边界情况：同一法术光环被移除后重新施加时，旧 auraInstanceID（来自移除前）可能未出现在 removedAuraInstanceIDs 中而继续留在 obj.aura 中。getMaxAuraByTable 遍历 obj.aura 时，若新旧两个条目具有相同的 spellId，它将按 expirationTime 取最大值。旧条目的 expirationTime 是原施放时的剩余时间，若该法术原施放时续较长（如 30 秒）但在几秒后被移除，则旧条目的 expirationTime 可能大于新施加条目的 expirationTime，导致 getMaxAuraByTable 选中已过期的旧条目。此时 C_UnitAuras.GetAuraDuration(unit, oldAuraInstanceID) 因旧实例已过期而返回 nil，最终该光环槽输出 0 而非正确值。另外，`OnUpdateUnitAura()` 一开始要求 `blocks.groups.auras` 存在；因此只配置 `rejuv`、不配置 `auras` 的 group 块不会输出回春数量。这是一个结构性问题，不是简单的功能不可用——如果只配置 rejuv 而不配置 auras，OnUpdateUnitAura()（`main.lua > Fuyutsui > OnUpdateUnitAura`）在入口处检查 blocks.groups.auras 为 nil 后直接 return，整个函数静默退出，rejuv 分支（`main.lua > Fuyutsui > OnUpdateUnitAura > rejuv`）永远不可达。
 
 ### 当前配置的队友光环
 
@@ -408,7 +415,7 @@ function Fuyutsui:UNIT_SPELLCAST_SENT(_, unitTarget, targetName, castGUID, spell
 end
 ```
 
-此处 `if not isSec(targetName)` 使用与第 248 行相同的 `isSec()` 机制（`issecretvalue` 的别名），过滤暴雪保护的秘密/遮蔽值——被隐藏或遮蔽的目标名无法通过字符串匹配找到对应队友，因此跳过该次施法目标记录。
+此处 `if not isSec(targetName)` 使用与「队友增益」节说明的 `isSec()` 机制（`issecretvalue` 的别名）相同的过滤方式，过滤暴雪保护的秘密/遮蔽值——被隐藏或遮蔽的目标名无法通过字符串匹配找到对应队友，因此跳过该次施法目标记录。
 
 若当前专精配置了 `施法目标`，Lua 会把 `state.castTargetIndex` 写到玩家状态区；Python 读到的是目标 group 槽位编号。这个字段不在 `state_dict["group"]` 内，但它和队友治疗链路有关。
 
@@ -487,7 +494,7 @@ Python `config.yml` 中实际配置了这些 group 字段：
 - `updateGroupInRangeAndHealth()` 每帧只刷新一个队友的血量和职责槽，团队人数多时完整轮询需要多帧。
 - `OnUpdateUnitAura()` 每 0.2 秒刷新一次队友光环槽。
 - `UNIT_AURA()` 只在队友 aura 事件到来时刷新驱散槽；如果状态异常，可能要等下一次 aura 事件或重新建组。
-- `updateGroup()` 目前不会主动调用 `clearGroupBlocks()`；同时局部 `group`/`groupList` 没有被清空。队伍人数减少或重新建组时，这是一个比"残留风险"严重得多的运行时数据污染问题。main.lua:16-17 将 Fuyutsui.group 和 Fuyutsui.groupList 缓存到局部变量 group/groupList。updateGroup() 执行 self.group = {} 创建新表赋值给 Fuyutsui.group（`main.lua > Fuyutsui > updateGroup`），但局部变量 group 仍指向旧表。后续所有对 group 和 groupList 的写入（`main.lua > Fuyutsui > updateGroup` 中的 `table.insert(groupList, unit)` 和 `group[unit] = {...}）`操作的都是旧表。而所有队友更新函数——包括 updateGroup() 末尾调用的 self:updateUnitValid(unit)、self:updateUnitHealthInfo(unit)、self:updateUnitFullAura(unit)（`main.lua > Fuyutsui > updateGroup` 末尾），以及 updateUnitHealthInfo、updateGroupInRangeAndHealth、OnUpdateUnitAura 等——都通过局部变量访问旧表。结果是：
+- `updateGroup()` 目前不会主动调用 `clearGroupBlocks()`；同时局部 `group`/`groupList` 没有被清空。队伍人数减少或重新建组时，这是一个比"残留风险"严重得多的运行时数据污染问题。main.lua:16-17 将 Fuyutsui.group 和 Fuyutsui.groupList 缓存到局部变量 group/groupList。updateGroup() 执行 self.group = {} 创建新表赋值给 Fuyutsui.group（`main.lua > Fuyutsui > updateGroup`），但局部变量 group 仍指向旧表。后续所有对 group 和 groupList 的写入（`main.lua > Fuyutsui > updateGroup` 中的 `table.insert(groupList, unit)` 和 `group[unit] = {...}`）操作的都是旧表。而所有队友更新函数——包括 updateGroup() 末尾调用的 self:updateUnitValid(unit)、self:updateUnitHealthInfo(unit)、self:updateUnitFullAura(unit)（`main.lua > Fuyutsui > updateGroup` 末尾），以及 updateUnitHealthInfo、updateGroupInRangeAndHealth、OnUpdateUnitAura 等——都通过局部变量访问旧表。结果是：
 
 1. groupList（旧表）永远不会被清空，每次 updateGroup() 调用后持续积累重复条目。
 2. 离队成员的条目永远保留在旧 group 表中，不会被移除。
@@ -506,17 +513,17 @@ Python `config.yml` 中实际配置了这些 group 字段：
 | 日期 | 修改位置 | 原因 | 摘要 |
 |---|---|---|---|
 | 2026-05-30 | 血量表格（spellId 186263） | spellId 186263 名称误写为「暗影痊合」 | 修正为「暗影愈合」 |
-| 2026-05-30 | 队友列表来自哪里（第94行） | 未说明团队模式下第1个槽位对应 raid1 而非玩家自身 | 补充团队模式与小队模式的明确说明 |
+| 2026-05-30 | 队友列表来自哪里（IterateGroupMembers 说明） | 未说明团队模式下第1个槽位对应 raid1 而非玩家自身 | 补充团队模式与小队模式的明确说明 |
 | 2026-05-30 | 总体链路（第3步） | 遗漏 updateGroup() 的初始化及 PLAYER_TALENT_UPDATE 触发路径 | 补充列出全部三个触发路径：初始化、PLAYER_TALENT_UPDATE、GROUP_ROSTER_UPDATE |
 | 2026-05-30 | 总体链路（第3步） | 遗漏 GROUP_ROSTER_UPDATE 的1秒防抖机制 | 补充说明 rosterTimer 取消重建及连续快速重组的防抖效果 |
 | 2026-05-30 | 队友增益（isSec 首次出现处） | 未解释 isSec() 的含义和来源 | 补充说明 isSec 是 issecretvalue 的局部别名，用于过滤暴雪保护秘密值 |
-| 2026-05-30 | 施法目标和治疗预估（isSec 出现处） | 同队友增益节遗漏 | 补充与第248行一致的 isSec 说明 |
+| 2026-05-30 | 施法目标和治疗预估（isSec 出现处） | 同队友增益节遗漏 | 补充与队友增益节一致的 isSec 过滤说明 |
 | 2026-05-30 | 队友可驱散状态（UNIT_AURA 说明） | 未提及驱散函数仅对已在 group 表中的单位生效 | 补充 getAuraDispelTypeColor 和 UNIT_AURA 的 group[unit] 检查说明 |
 | 2026-05-30 | 视野机制（inSight 说明） | 未点明 inSight 几乎永远为 true 的实战效果 | 补充说明 inSight 检查近乎形同虚设，mod 作者不应依赖
-| 2026-05-30 | 队友增益（isSec 行号） | 错误声称 isSec 在第 369 行使用，实际第 369 行为 updatePlayerBlocks | 将「第 369 行也使用相同机制」替换为准确的 getMaxAuraByTable 第 1224 行和 UNIT_SPELLCAST_SENT 第 1411 行引用 |
+| 2026-05-30 | 队友增益（isSec 使用位置） | 错误声称 isSec 在 updatePlayerBlocks 函数处使用 | 将模糊的函数名引用替换为准确的 getMaxAuraByTable 和 UNIT_SPELLCAST_SENT 事件名说明 |
 | 2026-05-30 | 总体链路（第3步） | 遗漏第4条 updateGroup() 触发路径及双重重入行为 | 补充路径 (d) updatePlayerBlocks()，并说明初始化及切专精时的双重重入 |
 | 2026-05-30 | 职责代码片段 | 使用了未定义的 trueValue 变量和 b 变量 | 补充 local trueValue = CreateColor(...) 和 local _, _, b = booleanValue:GetRGB() |
-| 2026-05-30 | 队友槽位排列（Python 公式） | 未提及 GetPixels.py 第352行注释与实际代码不符 | 添加注说明注释含 -1 但实际执行无 -1 |
+| 2026-05-30 | 队友槽位排列（Python 公式） | 未提及 GetPixels.py 中注释与实际代码不符 | 添加注说明注释含 -1 但实际执行无 -1 |
 | 2026-05-30 | 血量（事件说明） | 未提及 UNIT_HEAL_ABSORB_AMOUNT_CHANGED 等事件也会更新玩家自身血量 | 补充这些事件同样调用 self:updatePlayerHealth() 的说明 |
 | 2026-05-30 | 总体链路（第4步后） | 遗漏 updateGroupInRangeAndHealth() 的每帧刷新机制和 updateIndex 停滞条件 | 添加4a步骤，说明 OnUpdate 每帧调用、updateIndex 控制单成员处理及停滞风险 |
 | 2026-05-30 | 血量（healAbsorb 说明后） | 未描述 healAbsorb 场景下 b<100 时曲线起点 B=0 的行为 | 补充当 b<100 时 0%~15% 血量区间 B=0，不可单纯依靠 B=0 判定死亡 |
@@ -533,7 +540,13 @@ Python `config.yml` 中实际配置了这些 group 字段：
 | 2026-05-30 | 队友增益（getMaxAuraByTable 嵌套循环） | 未描述 isSec 检查删除的嵌套 pairs 遍历模式 | 补充说明外层 for spellIds × 内层 for obj.aura 的冗余遍历及微性能开销 |
 | 2026-05-30 | 队友增益（同一法术重施加边界情况） | 未将旧 auraInstanceID 残留风险与 getMaxAuraByTable 的 expirationTime 取最大值行为关联 | 补充说明新旧条目共存时过期旧条目可能被选中，导致 C_UnitAuras.GetAuraDuration 返回 nil 并输出 0 |
 | 2026-05-30 | 队友可驱散状态（maxResults=1 限制） | 未说明 GetUnitAuraInstanceIDs 的 maxResults=1 限制同一目标多种可驱散 Debuff 时的检测覆盖 | 补充 maxResults=1 至多返回 1 个实例及第 4 参数被静默忽略的说明 |
-| 2026-05-30 | 队友列表来自哪里（第102行） | 对 GetNumGroupMembers() 返回值及迭代行为的描述不准确 | 修正为团队模式下 numGroupMembers = GetNumGroupMembers()（原始值，包含玩家自身），迭代起始 i=1，遍历范围 raid1~raidN（含玩家自身槽位）|
+| 2026-05-30 | 队友列表来自哪里（代码运行路径说明） | 对 GetNumGroupMembers() 返回值及迭代行为的描述不准确 | 修正为团队模式下 numGroupMembers = GetNumGroupMembers()（原始值，包含玩家自身），迭代起始 i=1，遍历范围 raid1~raidN（含玩家自身槽位）|
 | 2026-05-30 | 总体链路（Step 3） | 遗漏 UNIT_SPELLCAST_SUCCEEDED 路径导致的第5条 updateGroup() 触发路径 | 补充说明 spellID 384255/200749 经 C_Timer.After(1) 延迟调用 updatePlayerSpecInfo → updatePlayerBlocks → updateGroup 的约1秒数据窗口 |
 | 2026-05-30 | Python 如何使用队友信息（函数表） | Theta 审核：get_lowest_health_unit_with_any_aura() 未说明 health_threshold 参数 | 补充 health_threshold 可选关键字参数说明（默认 100，排除满血目标），注明与 Lua 像素编码无关 |
 | 2026-05-30 | 总体链路（Step 3, updateGroupType 说明） | Theta 审核：遗漏队伍类型像素编码值 | 补充 groupType 像素编码映射表（单人 0、小队 46、团队 1-8），注明单人模式与未写入状态不可区分的限制 |
+| 2026-05-30 | 全文 | 编辑后行号引用失效 | 将「第 X 行」等行号引用与内部交叉行号替换为 `main.lua > ClassName > function` 调用链定位格式 |
+| 2026-05-30 | 总体链路（Step 3, GROUP_ROSTER_UPDATE 处理说明） | Theta 审核：遗漏 castTargetIndex 未被清除的说明 | 补充 castTargetIndex 仅在 UNIT_SPELLCAST_STOP 中置 0，与已置 nil 的 castTargetName/castTargetUnit 状态不一致 |
+| 2026-05-30 | 血量（事件刷新机制描述） | Theta 审核：「还会」措辞可能误认为事件触发血量像素重算 | 澄清事件仅通过 updateUnitDeathByHealthInfo 更新死亡/有效状态，血量像素由每帧轮询的 updateGroupInRangeAndHealth 调用 updateUnitHealthInfo 重新计算 |
+| 2026-05-30 | 血量（死亡处理函数区分） | Theta 审核：未区分两个死亡检测函数 | 补充 updateUnitDeath（GUID 匹配，UNIT_DIED 触发）与 updateUnitDeathByHealthInfo（API 查询，血量事件触发）的调用路径和覆盖范围差异 |
+| 2026-05-30 | 职责槽写入代码片段 | Theta 审核：未说明 falseValueBlack 定义及语义后果 | 补充 falseValueBlack 为纯黑色（B=0），超出距离单位与死亡/无效单位像素不可分的设计原因 |
+| 2026-05-30 | 队友增益（isSec 使用位置列举） | Theta 审核：遗漏 UNIT_AURA 事件处理函数的两条 isSec 过滤分支 | 补充 addedAuraInstanceIDs 分支和 updatedAuraInstanceIDs 分支，两条独立于 getMaxAuraByTable 的过滤路径 |
