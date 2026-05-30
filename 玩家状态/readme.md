@@ -43,7 +43,7 @@ Python 端读取到的是：
 | `专精` | `C_SpecializationInfo.GetSpecialization()` | 专精序号，通常 1-4，不是 65/250 这类 specID |
 | `有效性` | `not isDead and not mounted and not isChatOpen and not drinkStatus` | Python 主循环只有它为真才执行战斗逻辑 |
 | `战斗` | `UnitAffectingCombat("player")` | 0/1 |
-| `移动` | `IsPlayerMoving()` 初始值, 由 PLAYER_STARTED_MOVING/PLAYER_STOPPED_MOVING 事件刷新 | 0/1，不是移动速度 |
+| `移动` | `IsPlayerMoving()` 初始值, 由 PLAYER_STARTED_MOVING/PLAYER_STOPPED_MOVING 事件触发 `updatePlayerMoving()`（Fuyutsui > main.lua > updatePlayerMoving）刷新；该函数在写入移动状态前先无条件置 `state.drinkStatus = false`，影响有效性合成 | 0/1，不是移动速度 |
 | `施法` | `UnitCastingDuration("player")` | 施法已用时间，按 0-2.55 秒映射到 0-255 |
 | `引导` | `UnitChannelDuration("player")` | 引导剩余时间，按 0-2.55 秒映射到 0-255 |
 | `蓄力` | `UnitEmpoweredChannelDuration("player")` | 蓄力剩余时间，按 0-2.55 秒映射到 0-255 |
@@ -87,7 +87,7 @@ state.valid = valid and 1 / 255 or 0
 | `isDead` | `PLAYER_DEAD`、`PLAYER_ALIVE`、`PLAYER_UNGHOST`，以及初始化时 `UnitIsDeadOrGhost("player")` | 死亡或灵魂状态时无效 |
 | `mounted` | `PLAYER_MOUNT_DISPLAY_CHANGED`、`UPDATE_SHAPESHIFT_FORM(S)`，以及初始化 | 使用 `IsMounted()`，并尝试把部分变形形态视为坐骑 |
 | `isChatOpen` | hook 默认聊天框 `EditBox` 焦点 | 打开聊天输入时无效，避免误发按键 |
-| `drinkStatus` | `UNIT_SPELLCAST_SUCCEEDED` 检查法术名”饮水”或”进食饮水”；`PLAYER_STARTED_MOVING` / `PLAYER_STOPPED_MOVING` 均触发 `updatePlayerMoving()`（Fuyutsui > main.lua > updatePlayerMoving） | 饮水后置 true，20 秒后清空；移动也会清空（注意：法术名称为中文客户端本地化值；英文客户端分别为 “Refreshment” 和 “Food and Drink”，此比较在非中文客户端永不为真。）移动事件调用的 `updatePlayerMoving()` 先设置 `state.drinkStatus = false`，紧接着调用 `self:updatePlayerValid()` 重新计算完整有效性公式（isDead、mounted、isChatOpen、drinkStatus 的合取）。 |
+| `drinkStatus` | `UNIT_SPELLCAST_SUCCEEDED` 检查法术名”饮水”或”进食饮水”；`PLAYER_STARTED_MOVING` / `PLAYER_STOPPED_MOVING` 均触发 `updatePlayerMoving()`（Fuyutsui > main.lua > updatePlayerMoving） | 饮水后置 true，20 秒后清空；移动也会清空（注意：法术名称为中文客户端本地化值；英文客户端分别为 “Refreshment” 和 “Food and Drink”，此比较在非中文客户端永不为真。）移动事件调用的 `updatePlayerMoving()` 先设置 `state.drinkStatus = false`，紧接着调用 `self:updatePlayerValid()` 重新计算完整有效性公式（isDead、mounted、isChatOpen、drinkStatus 的合取）。请注意 PLAYER_STOPPED_MOVING 同样触发 drinkStatus=false，这一联动是设计选择而非逻辑必然，依赖饮水状态的 mod 作者应在 Stop 事件后重新确认 drinkStatus。 |
 
 注意 `updateDrinkStatus()` 的 else 分支会在法术名不是”饮水”或”进食饮水”时立即将 `drinkStatus` 置 false 并取消已有计时器。由于 `UNIT_SPELLCAST_SUCCEEDED` 对每次玩家成功施法都调用 `updateDrinkStatus(spellID)`，任何非饮水法术（包括战斗中的输出技能）都会立即清空 `drinkStatus`，实际窗口期远短于 20 秒。
 
@@ -107,7 +107,7 @@ local _, _, b = healthPercent:GetRGB()
 self:CreatTexture(blocks.state["生命值"], b)
 ```
 
-`curve100` 把百分比映射到 B 通道，Python 读到的值通常是 1-100 的整数百分比。注意 curve100 在参数 b=100 时 z=0，产生三个控制点 (0,0)、(0,1/255)、(1,100/255)，第二个点覆盖第一个点后等效映射为 B=(1+99*t)/255。50% 血量时 B=50.5/255，Python 读到约 51 而非 50。除 100% 血量外，全范围存在约 +1 的系统偏移。此外 `creatColorCurveScaling` 在 b>100 时还有一个分支（Fuyutsui > main.lua > creatColorCurveScaling），创建仅含两个控制点 (0, (b-100)/255) 和 (1, b/255) 的曲线，产生不同于 b<=100 三控制点曲线的偏移起点。此分支在运行时可通过 updateUnitHealthInfo（Fuyutsui > main.lua > updateUnitHealthInfo 的 100 + inComingHeals - healAbsorb）在 inComingHeals > healAbsorb 时进入，常见于团队治疗场景。`UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 都会触发玩家血量刷新。但 `UNIT_HEAL_PREDICTION` 对队伍成员的行为不对称：当事件 unit 是玩家自身时，调用 `updatePlayerHealth()` 刷新血量像素；当 unit 是队伍成员时（main.lua 中 group[unit] 分支），仅调用 `updateUnitDeathByHealthInfo()` 检测死亡，不调用 `updateUnitHealthInfo()` 刷新血量像素。依赖治疗预估事件观察队友血量的 mod 作者需注意此差异。
+`curve100` 把百分比映射到 B 通道，Python 读到的值通常是 1-100 的整数百分比。注意 curve100 在参数 b=100 时 z=0，产生三个控制点 (0,0)、(0,1/255)、(1,100/255)，第二个点覆盖第一个点后等效映射为 B=(1+99*t)/255。50% 血量时 B=50.5/255，Python 读到约 51 而非 50。除 100% 血量外，全范围存在约 +1 的系统偏移。此外 `creatColorCurveScaling` 在 b>100 时还有一个分支（Fuyutsui > main.lua > creatColorCurveScaling），创建仅含两个控制点 (0, (b-100)/255) 和 (1, b/255) 的曲线，产生不同于 b<=100 三控制点曲线的偏移起点。此分支在运行时可通过 updateUnitHealthInfo（Fuyutsui > main.lua > updateUnitHealthInfo 的 100 + inComingHeals - healAbsorb）在 inComingHeals > healAbsorb 时进入，常见于团队治疗场景。`UNIT_HEALTH`、`UNIT_MAXHEALTH`、`UNIT_HEAL_ABSORB_AMOUNT_CHANGED`、`UNIT_HEAL_PREDICTION` 都会触发玩家血量刷新。但 `UNIT_HEAL_PREDICTION` 对队伍成员的行为不对称：当事件 unit 是玩家自身时，调用 `updatePlayerHealth()` 刷新血量像素；当 unit 是队伍成员时（main.lua 中 group[unit] 分支），仅调用 `updateUnitDeathByHealthInfo()` 检测死亡，不调用 `updateUnitHealthInfo()` 刷新血量像素。队伍成员的治疗预估变化不会立即触发血量像素刷新；血量像素更新依赖 OnUpdate 每帧轮转的 `updateGroupInRangeAndHealth` 在下一次轮转至此成员时生效，引入最多 1 帧的延迟。依赖治疗预估事件观察队友血量的 mod 作者需注意此差异。
 
 这里读的是百分比，不是当前血量数值，也不是最大血量数值。Python 职业逻辑通常直接比较：
 
@@ -153,7 +153,7 @@ local specialPowerMap = {
 - 当 `UnitPower()` 不是受保护值，并且资源类型在 `specialPowerMap` 中时，写 `神圣能量`、`连击点`、`灵魂碎片`、`真气`、`精华能量` 等专用字段。
 - 当 `UnitPower()` 不是受保护值，并且资源类型不在 `specialPowerMap` 中时，当前源码没有在这个函数里写 `能量值`。
 
-对于 mana/rage/focus/energy/runic_power/lunar_power/insanity/fury/pain 等不在 specialPowerMap（仅含连击点/神圣能量/精华能量/灵魂碎片/真气五种）中的资源类型，且 isSec(power) 为假时，三路分支均不执行更新 `能量值`，能量值（step 12 对应像素）永远不会被此函数更新。受影响的职业包括但不限于：战士（怒气）、法师（法力）、死亡骑士（符文能量）、猎人（集中值）、牧师（法力）、德鲁伊非连击点专精（法力/怒气/能量）、萨满（法力）等。这些职业的能量值字段实质上无法通过 `updatePlayerPower` 刷新。
+对于 mana/rage/focus/energy/runic_power/lunar_power/insanity/fury/pain/maelstrom 等不在 specialPowerMap（仅含连击点/神圣能量/精华能量/灵魂碎片/真气五种）中的资源类型，且 isSec(power) 为假时，三路分支均不执行更新 `能量值`，能量值（step 12 对应像素）永远不会被此函数更新。受影响的职业包括但不限于：战士（怒气）、法师（法力）、死亡骑士（符文能量）、猎人（集中值）、牧师（法力）、德鲁伊非连击点专精（法力/怒气/能量）、萨满（法力；元素/增强专精为漩涡，法力仅适用于恢复专精）等。这些职业的能量值字段实质上无法通过 `updatePlayerPower` 刷新。
 
 注意：SetTestSecret(1) 强制 secret*RestrictionsForced 系 CVar 为 1 使 isSec() 对确实受保护的值类别（spellID、GUID、名字、光环数据）返回真，但玩家自身 UnitPower("player") 返回的简单整数不属于受保护类别（此结论基于 WoW API 在非受保护环境中 UnitPower 返回常见整数值时的观察，SetTestSecret(1) 后的具体行为边界未经官方确认，属于推测性描述）。因此 isSec(power) 在运行时返回假，specialPowerMap 分支正常执行，通过 CreatTexture(blockIndex, power / 255) 写入 神圣能量/连击点/灵魂碎片/真气/精华能量。对于 Paladin/Druid/Evoker/Warlock/Monk 专精，if not isSec(power) and specialPower 分支是实际运行路径，分支 1（UnitPowerPercent -> 能量值）仅在资源类型不在 specialPowerMap 中时执行。
 
@@ -251,7 +251,7 @@ self:updatePlayerValid()
 
 另外注意物品计数刷新存在两个问题：一是 `ITEM_COUNT_CHANGED` 在 Fuyutsui > core.lua > OnEnable 中未注册（尽管 Fuyutsui > main.lua 已定义处理函数），`BAG_UPDATE` 同样未在 OnEnable 中注册，结合两者缺失，确认物品数量变更完全无法通过任何事件驱动刷新。二是 `updateItemCoolDown()` 中 `GetItemCount()` 一次性设置全部 5 个计数（HealthPotionCount/ManaPotionCount/HealthstoneCount/RecklessnessCount/LightsPotentialCount），任一计数为 nil 时触发，此后所有计数仅初始化一次。每个物品仅当对应计数为 nil 时才调用 `GetItemCount()`（如 `if not self.state.HealthPotionCount then self:GetItemCount() end`），一旦计数设为非 nil 就永久跳过刷新。两者叠加导致所有 5 个计数在初始化后全部冻结，影响范围远大于文档之前仅聚焦的 HealthPotionCount。
 
-此外 `SPELL_UPDATE_USES` 和 `SPELL_UPDATE_CHARGES` 均已在 core.lua 注册，但它们的 addon 级处理函数是空的（仅占位），实际功能由 Fuyutsui > core/block.lua 中 countBars 框架帧独立处理。此注册是冗余的。`SPELL_RANGE_CHECK_UPDATE` 和 `ACTION_RANGE_CHECK_UPDATE` 也属于同一模式——在 core.lua 的 OnEnable 中注册，main.lua 中处理函数仅包含注释掉的 `updateNameplateCount()` 调用，从未执行实际功能。
+此外 `SPELL_UPDATE_USES` 和 `SPELL_UPDATE_CHARGES` 均已在 core.lua 注册，但它们的 addon 级处理函数是空的（仅占位），实际功能由 Fuyutsui > core/block.lua 中 countBars 框架帧独立处理。此注册是冗余的。`ENCOUNTER_TIMELINE_EVENT_ADDED`、`ENCOUNTER_TIMELINE_EVENT_REMOVED` 和 `ENCOUNTER_TIMELINE_EVENT_STATE_CHANGED` 同样在 core.lua 的 OnEnable 中注册，但在 main.lua 中仅有空函数体（无实际操作），属于同一冗余注册模式。`SPELL_RANGE_CHECK_UPDATE` 和 `ACTION_RANGE_CHECK_UPDATE` 也属于同一模式——在 core.lua 的 OnEnable 中注册，main.lua 中处理函数仅包含注释掉的 `updateNameplateCount()` 调用，从未执行实际功能。
 
 ## 施法、引导和蓄力
 
@@ -306,6 +306,8 @@ if 引导 > 0:
 > 注意：源代码（Fuyutsui > main.lua > 目标类型注释处）的注释将 13 与 14 的标签写反（13=疾病、14=诅咒）。文档值经 `friendCurve` 映射确认是正确的（`dispelAbilities[2]`=诅咒驱散对应 13=诅咒减益，`dispelAbilities[3]`=疾病驱散对应 14=疾病减益），读者在对照源码时需注意此注释错误。同时 `dispelCapabilities` 表（Fuyutsui > main.lua > dispelCapabilities 注释处）也存在同类注释错位（2=疾病驱散、3=诅咒驱散）。
 
 注意目标类型值 1-3（敌方）和 11-15（友方）中可驱散类型的判定取决于 `updateSpellKnown()`（Fuyutsui > main.lua > updateSpellKnown）中通过 `hasLearnedAnySpell()` 调用 `IsSpellKnown()` 动态检测玩家是否学习了对应驱散法术。`dispelAbilities` 表（Fuyutsui > main.lua > dispelAbilities）定义防御驱散法术 ID 组（如 528 魔法驱散等），`offensiveDispelAbilities`（Fuyutsui > main.lua > offensiveDispelAbilities）定义进攻驱散法术 ID 组（如 2908 激怒驱散）。不同角色因职业/专精/是否学习驱散法术而产生不同的目标类型取值范围，这是理解目标类型值在不同角色间差异的关键前提。
+
+此外，源码 `dispelAbilities[11]` 表中存在流血驱散条目（空 `{}`），`hasLearnedAnySpell({})` 始终返回 false，因此不会产生含驱散标记的友方目标类型变体。此条目不影响功能，但属于表中遗漏的边缘情况。
 
 敌方是否在范围内用 `self.state.specRange` 判断；友方目标按 40 码判断。`specRange` 来自 `Fuyutsui.rangeSpecID`，不是 Python 配置。
 
@@ -517,7 +519,11 @@ C_UnitAuras.GetBuffDataByIndex(unit, i, "HELPFUL|BIG_DEFENSIVE")
 C_UnitAuras.GetAuraDuration("player", state.DefensiveAuraInstanceID)
 ```
 
+`GetDefensiveAuraInstanceID` 通过 `not issecretvalue(aura) and aura` 条件过滤受保护光环数据。在大秘境和评级 PvP 等受保护场景中，受保护光环的 auraInstanceID 不会被记录，防御光环剩余时间输出不可用。
+
 因此它不属于 `core/auras.lua` 的玩家逻辑光环系统，但本质上仍是一个真实光环剩余时间。本文把它列在 block 字段里，是因为它通过 `blocks.state["防御光环"]` 写入，而不是通过 `blocks.auras` 写入。
+
+注意 `GetDefensiveAuraInstanceID` 对于非 player 单位直接返回，`GetDefensiveAuraDuration` 硬编码 `'player'` 调用 `C_UnitAuras.GetAuraDuration`。若需要追踪队伍成员的防御光环，模组开发者必须自行实现参数化的版本。
 
 ## Python 端的结构
 
@@ -607,14 +613,14 @@ countBars 的 StatusBar 在 Fuyutsui > core/block.lua 注册了三个事件（`S
 | 2026-05-30 | Iota | 刷新频率表 | Theta 二审 | 添加"法术失败"至事件驱动行，补充英雄天赋备注 |
 | 2026-05-30 | Iota | 队伍状态 | Theta 二审 | 补充 NUM_GROUPS=30 的固定槽位说明 |
 | 2026-05-30 | Iota | 目标施法和目标引导 | Theta 终审 | 补充 falseValueWhite 实际颜色为蓝色的注释 |
-| 2026-05-30 | Iota | 能量值和职业资源 | Theta 终审 | 补充 EnumPowerType 映射表（config.lua 第 766-787 行） |
+| 2026-05-30 | Iota | 能量值和职业资源 | Theta 终审 | 补充 EnumPowerType 映射表（Fuyutsui > core/config.lua > EnumPowerType） |
 | 2026-05-30 | Iota | 有效性如何计算 | Theta 终审 | 补充 drinkStatus 法术名称本地化依赖警告及跨语言说明 |
 | 2026-05-30 | Iota | Python 端的结构 | Theta 终审 | countBars 职业列表补充萨满 |
 | 2026-05-30 | Iota | 疾病判断 | Theta 终审 | 补充 UI_ERROR_MESSAGE 中文字符串语言依赖警告 |
 | 2026-05-30 | Iota | 队伍状态 | Theta 终审 | roleMap 补充回退值 5，新增 updateUnitInSight 机制说明 |
 | 2026-05-30 | Iota | 能量值和职业资源之后 | Theta 终审 | 新增「受保护值(isSec)对事件链的影响」独立子节，说明 isSec 在 UNIT_SPELLCAST_SUCCEEDED/FAILED/SENT 中的拦截行为及对大秘境场景的影响 |
 | 2026-05-30 | Iota | 法术失败 | Theta 终审 | 补充 isUsable 前提条件，说明冷却中技能不写入法术失败像素 |
-| 2026-05-30 | Iota | 目标类型 | Theta 终审 | 补充 main.lua 第 921-922 行及第 166-167 行注释错位说明 |
+| 2026-05-30 | Iota | 目标类型 | Theta 终审 | 补充 Fuyutsui > main.lua 目标类型注释处及 dispelCapabilities 注释处注释错位说明 |
 | 2026-05-30 | Iota | 队伍状态 | Theta 终审 | 补充 GROUP_ROSTER_UPDATE 1 秒防抖延迟说明 |
 | 2026-05-30 | Iota | 队伍状态 | Theta 终审 | 展开 inComingHeals 完整生命周期（helpfulSpells 表、施法开始/结束设置清零） |
 | 2026-05-30 | Iota | 物品状态为什么也算 block | Theta 终审 | 补充 updateItemCoolDown 中 math.min(1, remainingTime/255) 数值钳制说明 |
@@ -635,7 +641,7 @@ countBars 的 StatusBar 在 Fuyutsui > core/block.lua 注册了三个事件（`S
 | 2026-05-30 | Iota | Python 端的结构 | Theta 终审 | 补充 PLAYER_TALENT_UPDATE 不调用 ClearAllFuyutsuiBars 导致 countBars 残留风险 |
 | 2026-05-30 | Iota | 受保护值(isSec)对事件链的影响 | Theta 终审+一审 | 补充 SetTestSecret(1) 默认强制 isSec 始终为真的说明 |
 | 2026-05-30 | Iota | 受保护值(isSec)对事件链的影响 汇总表 | Theta 终审+一审 | 补充 UNIT_DIED 行至 isSec 汇总表 |
-| 2026-05-30 | Iota | 队伍状态 | Theta 终审+一审 | 修正 specRole 行号引用（341 -> 340:GetCharacterSpecInfo; 364:updatePlayerSpecInfo） |
+| 2026-05-30 | Iota | 队伍状态 | Theta 终审+一审 | 修正 specRole 引用（Fuyutsui > main.lua > GetCharacterSpecInfo；Fuyutsui > main.lua > updatePlayerSpecInfo） |
 | 2026-05-30 | Iota | 物品状态为什么也算 block | Theta 终审+一审 | 扩充 value=1 歧义描述为四条路径（含无冷却路径） |
 | 2026-05-30 | Iota | 能量值和职业资源 | Theta 终审+一审 | 补充 SetTestSecret(1) 导致专用资源分支默认不可达的注释 |
 | 2026-05-30 | Iota | 法术失败 | Theta 终审+一审 | 补充 failedSpell/failedSpellId/failedSpellTimer 三个模块级局部变量说明 |
@@ -666,3 +672,12 @@ countBars 的 StatusBar 在 Fuyutsui > core/block.lua 注册了三个事件（`S
 | 2026-05-30 | Iota | 敌人人数 | Theta Iota | 为 testEncounter 示例添加 encounterID 与 bossID 映射表输入键的概念区分 |
 | 2026-05-30 | Iota | 能量值和职业资源 | Theta Iota | 补充 UNIT_POWER_UPDATE 仍调用 updatePlayerPower 但不产生像素更新的说明 |
 | 2026-05-30 | Iota | 配置开关状态 | Theta Iota | 补充输出模式与一键辅助字段独立机制说明（/fu dpsmode 与 C_AssistedCombat 无联动） |
+| 2026-05-30 | Iota | 基础状态字段 — 移动行 | Theta 终审 | 补充 updatePlayerMoving() 写入移动状态前先无条件置 drinkStatus=false，影响有效性合成 |
+| 2026-05-30 | Iota | 有效性如何计算 | Theta 终审 | 补充 PLAYER_STOPPED_MOVING 触发 drinkStatus=false，此联动为设计选择而非逻辑必然 |
+| 2026-05-30 | Iota | 能量值和职业资源 | Theta 终审 | 补充 MAELSTROM 至受影响资源类型列表，补充元素/增强萨满漩涡主资源说明 |
+| 2026-05-30 | Iota | Lua 内部但未直接输出的玩家状态 | Theta 终审 | 补充 ENCOUNTER_TIMELINE_EVENT_ADDED/REMOVED/STATE_CHANGED 冗余注册说明 |
+| 2026-05-30 | Iota | 防御光环是特殊例外 | Theta 终审 | 补充 issecretvalue(aura) 在受保护场景中过滤防御光环详情 |
+| 2026-05-30 | Iota | 防御光环是特殊例外 | Theta 终审 | 补充 GetDefensiveAuraInstanceID 非 player 直接返回及 GetDefensiveAuraDuration 硬编码 player 的扩展性约束 |
+| 2026-05-30 | Iota | 目标类型 | Theta 终审 | 补充 dispelAbilities[11] 流血驱散空条目边缘情况说明 |
+| 2026-05-30 | Iota | 生命值 | Theta 终审 | 补充 UNIT_HEAL_PREDICTION 对队伍成员引入最多 1 帧延迟 |
+| 2026-05-30 | Iota | 修订记录 | Theta 终审 | 将行号引用替换为调用链定位符 |
